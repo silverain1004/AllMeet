@@ -1,0 +1,28 @@
+# gcloud run deploy --source . 업로드 시 제외할 경로 (용량·시간 절약, 비밀 유출 방지).
+# runtime.txt 는 GCP Python 빌드팩이 파싱하므로 주석 없이 "python-3.12" 한 줄만 둠 (설명은 requirements.txt).
+
+# Git 메타데이터 (소스에 불필요)
+.git/
+.gitignore
+
+# Python 캐시·가상환경 (배포 번들에 불필요)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+
+# IDE·로컬 전용
+.vscode/
+.idea/
+.cursor/
+*.log
+
+# 비밀·자격 증명 (절대 업로드 금지)
+.env
+.env.*
+key.json
+*.pem
