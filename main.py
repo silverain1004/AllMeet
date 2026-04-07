@@ -123,7 +123,12 @@ def _extract_user_message(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _dispatch_by_intent(intent: UserIntent, user_message: str) -> str | dict[str, Any]:
+def _dispatch_by_intent(
+    intent: UserIntent,
+    user_message: str,
+    # 구글 챗 POST 본문 전체. type=MESSAGE 이면 Firestore conversations 로드·저장 (main 은 payload 만 넘김)
+    payload: dict[str, Any],
+) -> str | dict[str, Any]:
     """
     의도에 따라 해당 도메인 핸들러만 호출합니다.
 
@@ -135,8 +140,8 @@ def _dispatch_by_intent(intent: UserIntent, user_message: str) -> str | dict[str
     """
     match intent:
         case UserIntent.DAILY_CHAT:
-            # 일상 대화: Vertex Gemini (domains.daily_chat)
-            return reply_daily_chat(user_message)
+            # 일상 대화: Vertex Gemini + Firestore 맥락 (domains.daily_chat.reply_daily_chat)
+            return reply_daily_chat(user_message, chat_event=payload)
         case UserIntent.EXPERT_FINDER:
             # 사내 전문가 찾기: 샘플 cardsV2 (domains.expert_finder)
             return handle_expert_finder(user_message)
@@ -148,7 +153,7 @@ def _dispatch_by_intent(intent: UserIntent, user_message: str) -> str | dict[str
             return handle_weekly_meeting(user_message)
         case _:
             # Enum 전수 매칭이므로 이론상 도달하지 않음 — 폴백으로 일상 대화
-            return reply_daily_chat(user_message)
+            return reply_daily_chat(user_message, chat_event=payload)
 
 
 @functions_framework.http
@@ -206,7 +211,7 @@ def hello_http(request):
     # 질문/발화 → 의도 → 도메인 핸들러
     intent = match_user_intent(user_message)
     logger.info("intent=%s message=%s", intent.value, user_message[:200])
-    reply = _dispatch_by_intent(intent, user_message)
+    reply = _dispatch_by_intent(intent, user_message, payload)
 
     # Google Chat 동기 응답은 REST Message 스키마만 인정 (text, cardsV2, accessoryWidgets 등).
     # 스키마에 없는 키(예: intent)를 넣으면 HTTP 200이어도 "무효한 메시지 페이로드"로 처리되어
