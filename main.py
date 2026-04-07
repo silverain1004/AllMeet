@@ -19,7 +19,7 @@ import functions_framework
 from domains.daily_chat import reply_daily_chat, welcome_with_capabilities_text
 from domains.expert_finder import handle_expert_finder
 from domains.schedule_management import handle_schedule_management
-from domains.weekly_meeting import handle_weekly_meeting
+from domains.weekly_meeting import handle_weekly_meeting, handle_weekly_meeting_action
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,6 +65,9 @@ def _weekly_meeting_like(text: str) -> bool:
     patterns = (
         r"주간\s*회의",
         r"주간회의",
+        r"주간\s*업무\s*보고",
+        r"주간업무보고",
+        r"세팅",
         r"팀\s*등록",
         r"인원\s*등록",
         r"회의\s*실\s*등록",
@@ -150,10 +153,36 @@ def _dispatch_by_intent(
             return handle_schedule_management(user_message)
         case UserIntent.WEEKLY_MEETING:
             # 주간 회의·팀/인원 등록: 샘플 cardsV2 (domains.weekly_meeting)
-            return handle_weekly_meeting(user_message)
+            return handle_weekly_meeting(user_message, chat_event=payload)
         case _:
             # Enum 전수 매칭이므로 이론상 도달하지 않음 — 폴백으로 일상 대화
             return reply_daily_chat(user_message, chat_event=payload)
+
+
+def _parse_card_parameters(payload: dict[str, Any]) -> dict[str, str]:
+    common = payload.get("common") or {}
+    action = payload.get("action") or {}
+    parameters = common.get("parameters")
+    if parameters is None:
+        parameters = action.get("parameters")
+    if isinstance(parameters, list):
+        return {
+            str(p.get("key")): str(p.get("value", ""))
+            for p in parameters
+            if isinstance(p, dict) and p.get("key") is not None
+        }
+    if isinstance(parameters, dict):
+        return {str(k): str(v) for k, v in parameters.items()}
+    return {}
+
+
+def _parse_form_inputs(payload: dict[str, Any]) -> dict[str, Any]:
+    common = payload.get("common") or {}
+    common_event = common.get("commonEventObject") or {}
+    form_inputs = common_event.get("formInputs") or common.get("formInputs") or {}
+    if not isinstance(form_inputs, dict):
+        return {}
+    return form_inputs
 
 
 @functions_framework.http
@@ -186,6 +215,30 @@ def hello_http(request):
     if payload.get("type") == "ADDED_TO_SPACE":
         return (
             json.dumps({"text": welcome_with_capabilities_text()}, ensure_ascii=False),
+            200,
+            {"Content-Type": "application/json; charset=utf-8"},
+        )
+
+    if payload.get("type") == "CARD_CLICKED":
+        common = payload.get("common") or {}
+        action = payload.get("action") or {}
+        invoked_function = common.get("invokedFunction") or action.get("function")
+        parameters = _parse_card_parameters(payload)
+        form_inputs = _parse_form_inputs(payload)
+        if invoked_function and invoked_function.startswith("wm_"):
+            reply = handle_weekly_meeting_action(
+                invoked_function=invoked_function,
+                parameters=parameters,
+                form_inputs=form_inputs,
+                chat_event=payload,
+            )
+            return (
+                json.dumps(reply, ensure_ascii=False),
+                200,
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
+        return (
+            json.dumps({"text": "처리할 카드 액션이 없습니다."}, ensure_ascii=False),
             200,
             {"Content-Type": "application/json; charset=utf-8"},
         )
