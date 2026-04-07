@@ -4,4 +4,10 @@ functions-framework>=3.0,<4
 # Vertex AI Gemini for domains/daily_chat. Keep sync responses fast (Chat ~30s limit).
 google-cloud-aiplatform>=1.38.0
 
+# Google Search grounding (domains/daily_chat — 주가·뉴스 등 실시간 정보)
+google-genai>=1.0.0
+
+# Firestore (firestore/ — 문서 쓰기·클라이언트)
+google-cloud-firestore>=2.16.0
+
 # Python version: must match runtime.txt (python-3.12).
