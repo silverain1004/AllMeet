@@ -3,7 +3,7 @@
 - 능력·기능 질문 → 고정 WHAT_I_CAN_DO_TEXT
 - 최신 정보 필요(주가·뉴스 등) → Google Search + Gemini (google-genai)
 - 그 외 → Vertex Gemini
-구글 챗 MESSAGE + 유효 space 이면 Firestore 연동.
+구글 챗 MESSAGE + 유효 space 이면 Firestore 연동(스키마는 conversation_store, 공통 CRUD는 firestore.documents).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 from config.settings import LOCATION, PROJECT_ID
 
-from firestore.conversation import ensure_conversation, list_recent_messages, record_messages
+from . import conversation_store as conv
 
 logger = logging.getLogger(__name__)
 
@@ -30,69 +30,70 @@ WHAT_I_CAN_DO_TEXT = (
     "그 외에도 필요하시면 편하게 말씀해 주세요."
 )
 
-# 1. 맥락을 보고 All-Meet 능력·기능 안내가 적절한지 LLM 으로 분류한다.
+_CAPABILITIES_CRITERIA = (
+    "사용자가 All-Meet(봇)이 무엇을 할 수 있는지·어떤 기능이 있는지·업무로 무엇을 도와줄 수 있는지 묻는 의도이면 yes.\n"
+    "그 외(일상 대화, 이야기, 다른 주제, 봇 기능과 무관한 말)면 no."
+)
+_WEB_SEARCH_CRITERIA = (
+    "사용자 질문에 답하려면 **최신 웹 검색**(실시간 주가·시세, 환율, 최신 뉴스, 오늘 날씨, 최근 지표 등 지금 시점의 정보)이 필요하면 yes.\n"
+    "일상 잡담, 감정 대화, 또는 모델 일반 지식만으로 충분하면 no."
+)
+
+
+# 함수 — LLM yes/no 분류 공통(역할·웹검색 판단에서 재사용).
+def _yes_no_classify(user_message: str, ctx_block: str, *, criteria: str, log_fail: str) -> bool:
+    msg = (user_message or "").strip()
+    if not msg:
+        return False
+    ctx = (ctx_block or "").strip()
+    try:
+        from vertexai.generative_models import GenerationConfig
+
+        body = (
+            "역할: 분류기. 출력은 yes 또는 no 한 단어(영문 소문자)만 쓰세요.\n\n"
+            f"{criteria}\n\n"
+        )
+        body += f"{ctx}\n\n" if ctx else "(이전 대화 없음)\n\n"
+        body += f'사용자 마지막 발화: "{msg}"\n\n분류:'
+        res = _get_generative_model().generate_content(
+            body,
+            generation_config=GenerationConfig(temperature=0, max_output_tokens=8),
+        )
+        raw = (res.text or "").strip().lower()
+        if not raw:
+            return False
+        first = raw.split()[0].rstrip(".,!?")
+        return first == "yes"
+    except Exception as e:
+        logger.warning(log_fail, e)
+        return False
+
+
+# 함수 — 사용자가 봇 능력·기능을 묻는지 LLM으로 판별.
 def _user_asks_capabilities(user_message: str, ctx_block: str) -> bool:
     """봇이 뭘 할 수 있냐는 질문이면 True. 실패 시 False(일반 대화로 처리)."""
-    msg = (user_message or "").strip()
-    if not msg:
-        return False
-    ctx = (ctx_block or "").strip()
-    try:
-        from vertexai.generative_models import GenerationConfig
-
-        body = (
-            "역할: 분류기. 출력은 yes 또는 no 한 단어(영문 소문자)만 쓰세요.\n\n"
-            "사용자가 All-Meet(봇)이 무엇을 할 수 있는지·어떤 기능이 있는지·업무로 무엇을 도와줄 수 있는지 묻는 의도이면 yes.\n"
-            "그 외(일상 대화, 이야기, 다른 주제, 봇 기능과 무관한 말)면 no.\n\n"
-        )
-        body += f"{ctx}\n\n" if ctx else "(이전 대화 없음)\n\n"
-        body += f'사용자 마지막 발화: "{msg}"\n\n분류:'
-        res = _get_generative_model().generate_content(
-            body,
-            generation_config=GenerationConfig(temperature=0, max_output_tokens=8),
-        )
-        raw = (res.text or "").strip().lower()
-        if not raw:
-            return False
-        first = raw.split()[0].rstrip(".,!?")
-        return first == "yes"
-    except Exception as e:
-        logger.warning("_user_asks_capabilities 실패, 일반 대화로 처리: %s", e)
-        return False
+    return _yes_no_classify(
+        user_message,
+        ctx_block,
+        criteria=_CAPABILITIES_CRITERIA,
+        log_fail="_user_asks_capabilities 실패, 일반 대화로 처리: %s",
+    )
 
 
+# 함수 — 웹 검색이 필요한 질문인지 LLM으로 판별.
 def _needs_web_search(user_message: str, ctx_block: str) -> bool:
     """주가·뉴스·실시간 정보 등 웹 검색이 필요하면 True (참고 KNOWLEDGE_SEARCH 판단)."""
-    msg = (user_message or "").strip()
-    if not msg:
-        return False
-    ctx = (ctx_block or "").strip()
-    try:
-        from vertexai.generative_models import GenerationConfig
-
-        body = (
-            "역할: 분류기. 출력은 yes 또는 no 한 단어(영문 소문자)만 쓰세요.\n\n"
-            "사용자 질문에 답하려면 **최신 웹 검색**(실시간 주가·시세, 환율, 최신 뉴스, 오늘 날씨, 최근 지표 등 지금 시점의 정보)이 필요하면 yes.\n"
-            "일상 잡담, 감정 대화, 또는 모델 일반 지식만으로 충분하면 no.\n\n"
-        )
-        body += f"{ctx}\n\n" if ctx else "(이전 대화 없음)\n\n"
-        body += f'사용자 마지막 발화: "{msg}"\n\n분류:'
-        res = _get_generative_model().generate_content(
-            body,
-            generation_config=GenerationConfig(temperature=0, max_output_tokens=8),
-        )
-        raw = (res.text or "").strip().lower()
-        if not raw:
-            return False
-        first = raw.split()[0].rstrip(".,!?")
-        return first == "yes"
-    except Exception as e:
-        logger.warning("_needs_web_search 실패: %s", e)
-        return False
+    return _yes_no_classify(
+        user_message,
+        ctx_block,
+        criteria=_WEB_SEARCH_CRITERIA,
+        log_fail="_needs_web_search 실패: %s",
+    )
 
 
-def _answer_with_google_search(user_message: str) -> str:
-    """Google Search 도구로 실시간 정보 검색 후 답변 (참고 bot/ai_handler.answer_with_web_search)."""
+# 함수 — Google Search 도구로 답변(맥락 ctx_block 있으면 프롬프트에 포함).
+def _answer_with_google_search(user_message: str, ctx_block: str = "") -> str:
+    """Google Search 도구로 실시간 정보 검색 후 답변. Firestore 맥락(ctx_block)이 있으면 프롬프트에 포함."""
     try:
         from google import genai
         from google.genai.types import GenerateContentConfig, GoogleSearch, Tool
@@ -103,13 +104,17 @@ def _answer_with_google_search(user_message: str) -> str:
 
         model_name = os.environ.get("ALLMEET_CHAT_MODEL", "gemini-2.0-flash-001")
         client = genai.Client()
+        intro = (
+            "당신은 All-Meet 업무 에이전트입니다. 아래 질문에 대해 검색 결과를 바탕으로 "
+            "한국어로 간결하고 정확하게 답하세요. 수치·시점은 검색에 나온 내용을 우선하세요.\n\n"
+        )
+        ctx = (ctx_block or "").strip()
+        if ctx:
+            intro += f"{ctx}\n\n"
+        contents = intro + f"질문: {user_message}"
         response = client.models.generate_content(
             model=model_name,
-            contents=(
-                "당신은 All-Meet 업무 에이전트입니다. 아래 질문에 대해 검색 결과를 바탕으로 "
-                "한국어로 간결하고 정확하게 답하세요. 수치·시점은 검색에 나온 내용을 우선하세요.\n\n"
-                f"질문: {user_message}"
-            ),
+            contents=contents,
             config=GenerateContentConfig(
                 tools=[Tool(google_search=GoogleSearch())],
                 temperature=0.3,
@@ -126,7 +131,7 @@ def _answer_with_google_search(user_message: str) -> str:
         )
 
 
-# 2. 봇 입장·빈 메시지 시 인사 + 잘하는 업무 안내 (main.py ADDED_TO_SPACE / 빈 MESSAGE).
+# 함수 — 봇 입장·빈 메시지용 인사 및 잘하는 업무 안내 문구.
 def welcome_with_capabilities_text() -> str:
     """봇 인사와 잘하는 업무 소개 문구."""
     return (
@@ -136,7 +141,7 @@ def welcome_with_capabilities_text() -> str:
     )
 
 
-# 3. 구글 챗 POST JSON에서 방 ID·표시 이름·user_context 를 뽑는다 (Firestore 키·문서 필드용).
+# 함수 — 구글 챗 이벤트 JSON에서 space_id, 표시명, user_context 추출.
 def _parse_google_chat_payload(payload: dict[str, Any]) -> tuple[str, str | None, dict[str, str]]:
     """구글 챗 이벤트 JSON에서 space_id, 표시명, user_context 튜플로 추출."""
     space_name = (payload.get("space") or {}).get("name") or ""
@@ -154,7 +159,7 @@ def _parse_google_chat_payload(payload: dict[str, Any]) -> tuple[str, str | None
     return space_id, (display or None), ctx
 
 
-# 4. Vertex Gemini 를 첫 호출 시 한 번만 초기화해 재사용한다.
+# 함수 — Vertex GenerativeModel 싱글톤(첫 호출 시 초기화).
 def _get_generative_model():
     """Vertex GenerativeModel 싱글톤(최초 호출 시 초기화)."""
     global _model
@@ -175,34 +180,22 @@ def _get_generative_model():
     return _model
 
 
-def _format_recent_dialogue(messages: list[dict[str, str]]) -> str:
-    """프롬프트에 넣을 최근 대화 블록(한 줄 한 턴)."""
-    if not messages:
-        return ""
-    lines: list[str] = []
-    for m in messages:
-        role = "사용자" if (m.get("role") == "user") else "All-Meet"
-        content = (m.get("content") or "").strip()
-        if content:
-            lines.append(f"{role}: {content}")
-    return "\n".join(lines)
-
-
-# 5. 이번 턴을 Firestore messages 에 동기 기록(다음 요청에서 list_recent_messages 로 조회).
+# 함수 — 이번 턴 user/assistant를 Firestore messages에 기록.
 def _persist_turn(space_id: str, user_name: str | None, user_message: str, assistant_message: str) -> None:
     try:
-        record_messages(space_id, user_name, user_message, assistant_message)
+        conv.record_messages(space_id, user_name, user_message, assistant_message)
     except Exception:
         logger.exception("Firestore 메시지 기록 실패")
 
 
-# 6. 한 턴: 맥락 로드 → 답 생성 → (조건 맞으면) 저장.
+# 메인 진입 — 일상 대화 한 턴(맥락 로드 → 답 생성 → 조건 시 저장).
 def reply_daily_chat(
     user_message: str,
     *,
     chat_event: dict[str, Any] | None = None,
 ) -> str:
     """일상 대화 한 턴 응답. chat_event는 main POST JSON; MESSAGE+space면 Firestore 연동."""
+    # 1. 입력 정리
     msg = (user_message or "").strip()
     if not msg:
         return "메시지를 입력해 주시면 대화할 수 있어요."
@@ -211,26 +204,29 @@ def reply_daily_chat(
     space_id: str | None = None
     user_display_name: str | None = None
 
+    # 2. MESSAGE + 유효 space면 Firestore 루트 보장·user_context 반영
     if chat_event and chat_event.get("type") == "MESSAGE":
         space_id, user_display_name, user_ctx = _parse_google_chat_payload(chat_event)
         if space_id != "unknown":
-            conversation_context = ensure_conversation(space_id, user_display_name, user_ctx)
+            conversation_context = conv.ensure_conversation(space_id, user_display_name, user_ctx)
 
+    # 3. 최근 대화 로드 → 프롬프트용 ctx_block
     ctx_block = ""
     if conversation_context is not None and space_id and space_id != "unknown":
         try:
-            recent_msgs = list_recent_messages(space_id, user_display_name)
+            recent_msgs = conv.list_recent_messages(space_id, user_display_name)
         except Exception:
             logger.warning("list_recent_messages 실패", exc_info=True)
             recent_msgs = []
-        block = _format_recent_dialogue(recent_msgs)
+        block = conv.format_recent_dialogue(recent_msgs)
         if block:
             ctx_block = f"\n[최근 대화]\n{block}\n"
 
+    # 4. 분기: 기능 안내 / 웹 검색 / Vertex Gemini 일상 대화
     if _user_asks_capabilities(msg, ctx_block):
         out = WHAT_I_CAN_DO_TEXT
     elif _needs_web_search(msg, ctx_block):
-        out = _answer_with_google_search(msg)
+        out = _answer_with_google_search(msg, ctx_block)
     else:
         if ctx_block.strip():
             recent_hint = (
@@ -261,6 +257,7 @@ def reply_daily_chat(
                 f"원문: {msg}"
             )
 
+    # 5. MESSAGE + 유효 space면 이번 턴을 Firestore에 기록
     if (
         chat_event
         and chat_event.get("type") == "MESSAGE"
