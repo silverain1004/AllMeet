@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from domains.weekly_meeting.cards import (
@@ -14,7 +13,8 @@ from domains.weekly_meeting.cards import (
 from firestore.team_config import (
     get_team_config,
     make_team_id,
-    parse_folder_schema,
+    parse_confluence_space_key,
+    parse_root_page_ids,
     parse_team_members,
     parse_template_page_id,
     upsert_team_config,
@@ -73,20 +73,24 @@ def handle_weekly_meeting_action(
             user_context=user_context,
             updates={"team_members": team_members, "setup_completed": False},
         )
-        return build_folder_schema_card(team_id=team_id, team_name=team_name)
+        return build_folder_schema_card(
+            team_id=team_id,
+            team_name=team_name,
+            include_action_response=True,
+        )
 
     if invoked_function == "wm_save_folder":
         team_id = (parameters.get("team_id") or "").strip()
         if not team_id:
             return {"text": "팀 식별자가 없습니다. 처음부터 다시 진행해 주세요."}
 
-        schema_text = _safe_form_value(form_inputs, "folder_schema")
+        root_pages_raw = _safe_form_value(form_inputs, "root_page_ids")
         try:
-            folder_schema = parse_folder_schema(schema_text)
-        except (ValueError, json.JSONDecodeError) as e:
-            return {"text": f"폴더 구조 형식이 올바르지 않습니다: {e}"}
-        if not folder_schema:
-            return {"text": "폴더 구조는 최소 1레벨 이상 입력해 주세요."}
+            root_pages = parse_root_page_ids(root_pages_raw)
+        except ValueError as e:
+            return {"text": f"루트 페이지 ID 형식이 올바르지 않습니다: {e}"}
+        if not root_pages:
+            return {"text": "루트 페이지 ID를 최소 1개 이상 입력해 주세요."}
 
         existing = get_team_config(team_id) or {}
         team_name = str(existing.get("team_name") or team_id)
@@ -95,9 +99,14 @@ def handle_weekly_meeting_action(
             team_name=team_name,
             space_id=space_id,
             user_context=user_context,
-            updates={"folder_schema": folder_schema, "setup_completed": False},
+            updates={"root_pages": root_pages, "setup_completed": False},
         )
-        return build_template_card(team_id=team_id)
+        existing_space_key = str(existing.get("confluence_space_key") or "")
+        return build_template_card(
+            team_id=team_id,
+            include_action_response=True,
+            suggested_space_key=existing_space_key,
+        )
 
     if invoked_function == "wm_save_template":
         team_id = (parameters.get("team_id") or "").strip()
@@ -109,6 +118,11 @@ def handle_weekly_meeting_action(
         template_page_id = parse_template_page_id(template_page_url)
         if template_page_id is None:
             return {"text": "Confluence 템플릿 링크 형식을 확인해 주세요."}
+        manual_space_key = _safe_form_value(form_inputs, "confluence_space_key")
+        parsed_space_key = parse_confluence_space_key(template_page_url)
+        confluence_space_key = parse_confluence_space_key(manual_space_key) or parsed_space_key
+        if confluence_space_key is None:
+            return {"text": "Confluence 스페이스 키를 찾지 못했습니다. 스페이스 키를 직접 입력해 주세요."}
 
         existing = get_team_config(team_id) or {}
         team_name = str(existing.get("team_name") or team_id)
@@ -120,9 +134,10 @@ def handle_weekly_meeting_action(
             updates={
                 "template_page_url": template_page_url,
                 "template_page_id": template_page_id,
+                "confluence_space_key": confluence_space_key,
                 "setup_completed": True,
             },
         )
-        return build_setup_completed_card(team_name=team_name)
+        return build_setup_completed_card(team_name=team_name, include_action_response=True)
 
     return {"text": "지원하지 않는 주간업무보고 카드 액션입니다."}

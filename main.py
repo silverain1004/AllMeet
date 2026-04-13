@@ -226,12 +226,16 @@ def hello_http(request):
         parameters = _parse_card_parameters(payload)
         form_inputs = _parse_form_inputs(payload)
         if invoked_function and invoked_function.startswith("wm_"):
-            reply = handle_weekly_meeting_action(
-                invoked_function=invoked_function,
-                parameters=parameters,
-                form_inputs=form_inputs,
-                chat_event=payload,
-            )
+            try:
+                reply = handle_weekly_meeting_action(
+                    invoked_function=invoked_function,
+                    parameters=parameters,
+                    form_inputs=form_inputs,
+                    chat_event=payload,
+                )
+            except Exception:
+                logger.exception("weekly meeting action failed: invoked_function=%s", invoked_function)
+                reply = {"text": "주간업무보고 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
             return (
                 json.dumps(reply, ensure_ascii=False),
                 200,

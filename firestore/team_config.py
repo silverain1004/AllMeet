@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from typing import Any
@@ -32,27 +31,49 @@ def parse_template_page_id(template_page_url: str) -> str | None:
     return None
 
 
+def parse_confluence_space_key(text_value: str) -> str | None:
+    """
+    Confluence URL 또는 직접 입력값에서 space key를 추출합니다.
+
+    - URL 예: /wiki/spaces/PLATFORM/pages/123...
+    - 직접 입력 예: PLATFORM
+    """
+    text = (text_value or "").strip()
+    if not text:
+        return None
+
+    m = re.search(r"/spaces/([^/\s]+)/", text, flags=re.IGNORECASE)
+    if m:
+        key = m.group(1).strip()
+        return key.upper() if key else None
+
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+        return text.upper()
+    return None
+
+
 def parse_team_members(raw_value: str) -> list[dict[str, str]]:
     parts = [p.strip() for p in re.split(r"[,\n]", raw_value or "") if p.strip()]
     return [{"name": name, "nickname": ""} for name in parts]
 
 
-def parse_folder_schema(raw_value: str) -> list[dict[str, Any]]:
-    text = (raw_value or "").strip()
-    if not text:
+def parse_root_page_ids(raw_value: str) -> list[dict[str, Any]]:
+    """
+    루트 페이지 ID를 줄바꿈/쉼표 기반으로 파싱합니다.
+
+    - 사용자는 한 줄에 하나씩 ID를 추가/삭제할 수 있습니다.
+    - URL이 들어오면 /pages/{id} 패턴에서 ID를 추출합니다.
+    """
+    parts = [p.strip() for p in re.split(r"[,\n]", raw_value or "") if p.strip()]
+    if not parts:
         return []
-    loaded = json.loads(text)
-    if not isinstance(loaded, list):
-        raise ValueError("folder_schema는 JSON 배열이어야 합니다.")
+
     out: list[dict[str, Any]] = []
-    for item in loaded:
-        if not isinstance(item, dict):
-            raise ValueError("folder_schema의 각 항목은 객체여야 합니다.")
-        level = item.get("level")
-        name = (item.get("name") or "").strip()
-        if not isinstance(level, int) or level < 1 or not name:
-            raise ValueError("folder_schema 항목은 level(int>=1)과 name(문자열)이 필요합니다.")
-        out.append({"level": level, "name": name})
+    for idx, part in enumerate(parts, start=1):
+        page_id = parse_template_page_id(part)
+        if page_id is None:
+            raise ValueError(f"{idx}번째 값에서 유효한 페이지 ID를 찾지 못했습니다: {part}")
+        out.append({"level": idx, "page_id": page_id})
     return out
 
 
