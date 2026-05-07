@@ -102,6 +102,58 @@ def _upsert_team_list(team_id: str, team_name: str) -> None:
         ref.set({"teams": teams}, merge=True)
 
 
+def get_team_list() -> list[dict[str, str]]:
+    """team_list 문서를 우선 사용하고, 없으면 config 문서들에서 폴백 생성."""
+    db = get_client()
+    ref = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC)
+    snap = ref.get()
+    teams: list[dict[str, str]] = []
+    if snap.exists:
+        data = snap.to_dict() or {}
+        for item in data.get("teams") or []:
+            if not isinstance(item, dict):
+                continue
+            team_id = str(item.get("id") or "").strip()
+            team_name = str(item.get("name") or "").strip()
+            if team_id and team_name:
+                teams.append({"id": team_id, "name": team_name})
+    if teams:
+        return teams
+
+    docs = db.collection(_CONFIG_COLLECTION).stream()
+    for doc in docs:
+        if doc.id == _TEAM_LIST_DOC:
+            continue
+        data = doc.to_dict() or {}
+        team_name = str(data.get("team_name") or doc.id).strip()
+        if team_name:
+            teams.append({"id": doc.id, "name": team_name})
+    teams.sort(key=lambda x: x["name"])
+    return teams
+
+
+def rename_team_in_list(team_id: str, new_team_name: str) -> None:
+    """team_list에서 팀 이름을 갱신합니다."""
+    new_name = (new_team_name or "").strip()
+    if not new_name:
+        return
+    teams = get_team_list()
+    changed = False
+    for team in teams:
+        if team.get("id") == team_id:
+            team["name"] = new_name
+            changed = True
+            break
+    if changed:
+        get_client().collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC).set({"teams": teams}, merge=True)
+
+
+def remove_team_from_list(team_id: str) -> None:
+    """team_list에서 팀 항목을 제거합니다."""
+    teams = [t for t in get_team_list() if t.get("id") != team_id]
+    get_client().collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC).set({"teams": teams}, merge=True)
+
+
 def get_team_config(team_id: str) -> dict[str, Any] | None:
     db = get_client()
     snap = db.collection(_CONFIG_COLLECTION).document(team_id).get()
@@ -139,3 +191,37 @@ def upsert_team_config(
 
     _upsert_team_list(team_id, team_name)
     return ref.get().to_dict() or {}
+
+
+def update_team_name(
+    *,
+    team_id: str,
+    new_team_name: str,
+    space_id: str,
+    user_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """팀 이름을 변경하고 team_list도 동기화합니다."""
+    existing = get_team_config(team_id)
+    if not existing:
+        raise ValueError("존재하지 않는 팀입니다.")
+    out = upsert_team_config(
+        team_id=team_id,
+        team_name=new_team_name,
+        space_id=space_id,
+        user_context=user_context,
+        updates={},
+    )
+    rename_team_in_list(team_id, new_team_name)
+    return out
+
+
+def delete_team(team_id: str) -> bool:
+    """팀 문서를 삭제하고 team_list에서 제거합니다."""
+    db = get_client()
+    ref = db.collection(_CONFIG_COLLECTION).document(team_id)
+    snap = ref.get()
+    if not snap.exists:
+        return False
+    ref.delete()
+    remove_team_from_list(team_id)
+    return True

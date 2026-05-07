@@ -65,6 +65,10 @@ def _weekly_meeting_like(text: str) -> bool:
     patterns = (
         r"주간\s*회의",
         r"주간회의",
+        r"주간\s*보고",
+        r"주간보고",
+        r"주간\s*업무",
+        r"주간업무",
         r"주간\s*업무\s*보고",
         r"주간업무보고",
         r"세팅",
