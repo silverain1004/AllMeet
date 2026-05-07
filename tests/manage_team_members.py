@@ -47,7 +47,8 @@ def _normalize_members(raw_members: Any) -> list[dict[str, Any]]:
             nickname = []
         else:
             nickname = _normalize_nicknames(str(raw_nickname))
-        out.append({"name": name, "nickname": nickname})
+        email = str(raw.get("email") or "").strip()
+        out.append({"name": name, "nickname": nickname, "email": email})
     return out
 
 
@@ -136,8 +137,14 @@ def _print_members(team_name: str, members: list[dict[str, Any]]) -> None:
         return
     for i, member in enumerate(members, start=1):
         nicknames = _nicknames_to_text(member)
+        email = str(member.get("email") or "").strip()
+        extra: list[str] = []
         if nicknames:
-            print(f"  {i}. {member['name']} (닉네임: {nicknames})")
+            extra.append(f"닉네임: {nicknames}")
+        if email:
+            extra.append(f"이메일: {email}")
+        if extra:
+            print(f"  {i}. {member['name']} ({' / '.join(extra)})")
         else:
             print(f"  {i}. {member['name']}")
 
@@ -165,18 +172,19 @@ def _action_register(teams: list[dict[str, str]]) -> list[dict[str, str]]:
             print("이름은 필수입니다.")
             return teams
         nicknames = _normalize_nicknames(input("닉네임 (쉼표 구분, 선택): "))
+        email = input("이메일 (선택): ").strip()
         doc = _get_team_doc(team["id"])
         members = _normalize_members(doc.get("team_members"))
-        members.append({"name": name, "nickname": nicknames})
+        members.append({"name": name, "nickname": nicknames, "email": email})
         _upsert_team_doc(team["id"], {"team_name": team["name"], "team_members": members})
         print("✅ 등록되었습니다.")
         return teams
 
     if choice == "2":
         print("\n=== 팀 추가 ===")
-        team_id = input("팀 ID (영문/숫자, 예: mes2): ").strip().lower()
-        if not re.fullmatch(r"[a-z0-9_-]+", team_id):
-            print("팀 ID는 영문 소문자/숫자/_/- 만 가능합니다.")
+        team_id = input("팀 ID (영문/숫자, 예: PC2): ").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]+", team_id):
+            print("팀 ID는 영문/숫자만 가능합니다. (예: PC2, MES2)")
             return teams
         if any(t["id"] == team_id for t in teams):
             print("이미 존재하는 팀 ID입니다.")
@@ -215,11 +223,15 @@ def _action_edit(teams: list[dict[str, str]]) -> None:
     target = members[idx]
     new_name = input(f"이름 (현재: {target['name']}, 변경 없으면 엔터): ").strip()
     current_nicks = _nicknames_to_text(target)
+    current_email = str(target.get("email") or "").strip()
     new_nick_raw = input(f"닉네임 (현재: {current_nicks or '-'}, 변경 없으면 엔터, 여러 개는 쉼표 구분): ").strip()
+    new_email = input(f"이메일 (현재: {current_email or '-'}, 변경 없으면 엔터): ").strip()
     if new_name:
         target["name"] = new_name
     if new_nick_raw:
         target["nickname"] = _normalize_nicknames(new_nick_raw)
+    if new_email:
+        target["email"] = new_email
     _upsert_team_doc(team["id"], {"team_members": members})
     print("✅ 수정되었습니다.")
 

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 import urllib.parse
+import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Iterable
 
 import google.auth
 from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 
 
 @dataclass
@@ -29,14 +32,34 @@ def _week_range(*, is_next_week: bool) -> tuple[str, str]:
     return start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")
 
 
-def _get_access_token() -> str:
-    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/calendar.readonly"])
-    if not creds.valid:
+def _refresh_and_get_token(creds: Any) -> str:
+    if not getattr(creds, "valid", False):
         creds.refresh(Request())
     token = getattr(creds, "token", None)
     if not token:
         raise RuntimeError("no_access_token")
-    return token
+    return str(token)
+
+
+def _get_access_token() -> str:
+    scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+    # 1) ADC 우선 (Cloud Run 기본 경로)
+    try:
+        creds, _ = google.auth.default(scopes=scopes)
+        return _refresh_and_get_token(creds)
+    except Exception:
+        pass
+
+    # 2) 로컬 key file fallback
+    key_file = os.environ.get("GOOGLE_CALENDAR_KEY_FILE") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if key_file:
+        try:
+            creds = service_account.Credentials.from_service_account_file(key_file, scopes=scopes)
+            return _refresh_and_get_token(creds)
+        except Exception:
+            pass
+
+    raise RuntimeError("calendar_auth_error")
 
 
 def _calendar_list_events(
@@ -63,9 +86,15 @@ def _calendar_list_events(
         req.add_header("Accept", "application/json")
         with urllib.request.urlopen(req, timeout=15) as resp:
             payload = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:  # type: ignore[name-defined]
+    except RuntimeError as e:
+        if str(e) == "calendar_auth_error":
+            return LookupResult(ok=False, events=[], error_kind="calendar_auth_error")
+        return LookupResult(ok=False, events=[], error_kind="calendar_access_error")
+    except urllib.error.HTTPError as e:
         if e.code == 404:
             return LookupResult(ok=False, events=[], error_kind="calendar_not_found")
+        if e.code in (401, 403):
+            return LookupResult(ok=False, events=[], error_kind="calendar_auth_error")
         return LookupResult(ok=False, events=[], error_kind="calendar_http_error")
     except Exception:
         return LookupResult(ok=False, events=[], error_kind="calendar_access_error")
@@ -87,10 +116,26 @@ def _calendar_list_events(
     return LookupResult(ok=True, events=out)
 
 
+def _contains_any(text: str, keywords: Iterable[str]) -> bool:
+    lowered = text.lower()
+    return any(k.lower() in lowered for k in keywords)
+
+
 def lookup_weekly_meeting(*, team_name: str, is_next_week: bool, calendar_id: str = "primary") -> LookupResult:
     time_min, time_max = _week_range(is_next_week=is_next_week)
     q = f"{team_name} 주간회의"
-    return _calendar_list_events(calendar_id=calendar_id, time_min=time_min, time_max=time_max, q=q)
+    result = _calendar_list_events(calendar_id=calendar_id, time_min=time_min, time_max=time_max, q=q)
+    if not result.ok:
+        return result
+    filtered: list[dict[str, str]] = []
+    for event in result.events:
+        summary = str(event.get("summary") or "")
+        if team_name not in summary:
+            continue
+        if "주간회의" not in summary.replace(" ", ""):
+            continue
+        filtered.append(event)
+    return LookupResult(ok=True, events=filtered)
 
 
 def lookup_member_vacation(
@@ -102,6 +147,7 @@ def lookup_member_vacation(
     time_min, time_max = _week_range(is_next_week=is_next_week)
     matched: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    vacation_keywords = ("휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation")
     for keyword in member_keywords:
         q = keyword.strip()
         if not q:
@@ -111,8 +157,9 @@ def lookup_member_vacation(
             return result
         for event in result.events:
             summary = event.get("summary", "")
-            lower = summary.lower()
-            if ("휴가" not in summary) and ("연차" not in summary) and ("반차" not in summary) and ("vacation" not in lower):
+            if not _contains_any(summary, vacation_keywords):
+                continue
+            if q.lower() not in summary.lower():
                 continue
             key = (summary, event.get("start", ""))
             if key in seen:

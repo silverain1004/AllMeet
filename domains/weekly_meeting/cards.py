@@ -29,10 +29,16 @@ def _wrap_card(
     return out
 
 
-def _team_items(teams: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _team_items(teams: list[dict[str, str]], *, selected_team_id: str = "") -> list[dict[str, Any]]:
     if not teams:
         return [{"text": "등록된 팀이 없습니다", "value": "__none__"}]
-    return [{"text": t["name"], "value": t["id"]} for t in teams]
+    out: list[dict[str, Any]] = []
+    for team in teams:
+        item: dict[str, Any] = {"text": team["name"], "value": team["id"]}
+        if selected_team_id and team["id"] == selected_team_id:
+            item["selected"] = True
+        out.append(item)
+    return out
 
 
 def _menu_back_button() -> dict[str, Any]:
@@ -51,12 +57,18 @@ def _members_text(team_name: str, members: list[dict[str, Any]]) -> str:
     for i, member in enumerate(members, start=1):
         name = html.escape(str(member.get("name") or ""))
         raw_nickname = member.get("nickname")
+        email = html.escape(str(member.get("email") or "").strip())
         if isinstance(raw_nickname, list):
             nicks = [html.escape(str(n).strip()) for n in raw_nickname if str(n).strip()]
         else:
             nicks = [html.escape(str(raw_nickname).strip())] if str(raw_nickname or "").strip() else []
+        desc: list[str] = []
         if nicks:
-            lines.append(f"{i}. {name} (닉네임: {', '.join(nicks)})")
+            desc.append(f"닉네임: {', '.join(nicks)}")
+        if email:
+            desc.append(f"이메일: {email}")
+        if desc:
+            lines.append(f"{i}. {name} ({' / '.join(desc)})")
         else:
             lines.append(f"{i}. {name}")
     return "<br>".join(lines)
@@ -124,6 +136,13 @@ def build_schedule_menu_card(teams: list[dict[str, str]], *, include_action_resp
                 ]
             }
         },
+        {
+            "buttonList": {
+                "buttons": [
+                    {"text": "캘린더 ID 설정", "onClick": {"action": {"function": "wm_schedule_open_calendar_id"}}},
+                ]
+            }
+        },
         _menu_back_button(),
     ]
     return _wrap_card("wm_schedule_menu", {"title": "AllMeet", "subtitle": "일정 조회"}, widgets, include_action_response=include_action_response)
@@ -133,6 +152,17 @@ def build_schedule_result_card(title: str, lines: list[str], *, include_action_r
     text = f"<b>{html.escape(title)}</b><br>" + ("<br>".join(lines) if lines else "조회 결과가 없습니다.")
     widgets = [{"textParagraph": {"text": text}}, _menu_back_button()]
     return _wrap_card("wm_schedule_result", {"title": "AllMeet", "subtitle": "일정 조회 결과"}, widgets, include_action_response=include_action_response)
+
+
+def build_schedule_calendar_id_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
+    widgets = [
+        {"textParagraph": {"text": "<b>팀별 캘린더 ID 설정</b><br>Google Calendar의 calendarId를 입력해 주세요. (예: primary 또는 xxx@group.calendar.google.com)"}},
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
+        {"textInput": {"name": "calendar_id", "label": "Calendar ID"}},
+        {"buttonList": {"buttons": [{"text": "저장", "onClick": {"action": {"function": "wm_schedule_save_calendar_id"}}}]}},
+        {"buttonList": {"buttons": [{"text": "일정 조회로 돌아가기", "onClick": {"action": {"function": "wm_open_schedule_menu"}}}]}},
+    ]
+    return _wrap_card("wm_schedule_calendar_id", {"title": "AllMeet", "subtitle": "일정 조회 > 캘린더 ID 설정"}, widgets, include_action_response=include_action_response)
 
 
 def build_team_setting_menu_card(*, include_action_response: bool = False) -> dict[str, Any]:
@@ -172,10 +202,19 @@ def build_team_add_card(*, include_action_response: bool = False) -> dict[str, A
     return _wrap_card("wm_team_add", {"title": "AllMeet", "subtitle": "팀 설정 > 추가"}, widgets, include_action_response=include_action_response)
 
 
-def build_team_edit_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
+def build_team_edit_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    current_team_name: str = "",
+    current_calendar_id: str = "",
+) -> dict[str, Any]:
     widgets = [
-        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
-        {"textInput": {"name": "new_team_name", "label": "새 팀 이름"}},
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_team_load_edit"}}}]}},
+        {"textInput": {"name": "new_team_name", "label": "새 팀 이름 (선택)", "value": current_team_name}},
+        {"textInput": {"name": "calendar_id", "label": "Calendar ID (선택, 예: primary)", "value": current_calendar_id}},
         {"buttonList": {"buttons": [{"text": "수정", "onClick": {"action": {"function": "wm_team_do_edit"}}}]}},
         {"buttonList": {"buttons": [{"text": "팀 설정으로 돌아가기", "onClick": {"action": {"function": "wm_open_team_menu"}}}]}}
     ]
@@ -230,21 +269,38 @@ def build_team_member_register_card(teams: list[dict[str, str]], *, include_acti
         {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
         {"textInput": {"name": "member_name", "label": "이름"}},
         {"textInput": {"name": "member_nicknames", "label": "닉네임 (쉼표 구분, 선택)"}},
+        {"textInput": {"name": "member_email", "label": "이메일 (선택)"}},
         {"buttonList": {"buttons": [{"text": "추가", "onClick": {"action": {"function": "wm_tm_do_register_member"}}}]}},
         _member_menu_back_button(),
     ]
     return _wrap_card("wm_tm_add", {"title": "AllMeet", "subtitle": "팀원 설정 > 추가"}, widgets, include_action_response=include_action_response)
 
 
-def build_team_member_edit_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
+def build_team_member_edit_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    selected_member_index: str = "",
+    current_member_name: str = "",
+    current_member_nicknames: str = "",
+    current_member_email: str = "",
+    member_snapshot_text: str = "",
+) -> dict[str, Any]:
     widgets = [
-        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
-        {"textInput": {"name": "member_index", "label": "수정할 팀원 번호 (1부터)"}},
-        {"textInput": {"name": "new_member_name", "label": "새 이름 (비우면 유지)"}},
-        {"textInput": {"name": "new_member_nicknames", "label": "새 닉네임 (쉼표 구분, 비우면 유지)"}},
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
+        {"textInput": {"name": "member_index", "label": "수정할 팀원 번호 (1부터)", "value": selected_member_index}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_tm_load_edit"}}}]}},
+        {"textInput": {"name": "new_member_name", "label": "새 이름 (선택)", "value": current_member_name}},
+        {"textInput": {"name": "new_member_nicknames", "label": "새 닉네임 (쉼표 구분, 선택)", "value": current_member_nicknames}},
+        {"textInput": {"name": "new_member_email", "label": "새 이메일 (선택)", "value": current_member_email}},
+    ]
+    if member_snapshot_text:
+        widgets.append({"textParagraph": {"text": member_snapshot_text}})
+    widgets.extend([
         {"buttonList": {"buttons": [{"text": "수정", "onClick": {"action": {"function": "wm_tm_do_edit"}}}]}},
         _member_menu_back_button(),
-    ]
+    ])
     return _wrap_card("wm_tm_edit", {"title": "AllMeet", "subtitle": "팀원 설정 > 수정"}, widgets, include_action_response=include_action_response)
 
 
@@ -275,9 +331,7 @@ def build_confluence_menu_card(*, include_action_response: bool = False) -> dict
             "buttonList": {
                 "buttons": [
                     {"text": "조회", "onClick": {"action": {"function": "wm_conf_open_view"}}},
-                    {"text": "수정 (스페이스)", "onClick": {"action": {"function": "wm_conf_open_edit_space"}}},
-                    {"text": "수정 (폴더 구조)", "onClick": {"action": {"function": "wm_conf_open_edit_root"}}},
-                    {"text": "수정 (템플릿)", "onClick": {"action": {"function": "wm_conf_open_edit_template"}}},
+                    {"text": "수정", "onClick": {"action": {"function": "wm_conf_open_edit"}}},
                 ]
             }
         },
@@ -303,34 +357,76 @@ def build_confluence_view_result_card(team_name: str, data: dict[str, Any], *, i
     return _wrap_card("wm_conf_view_result", {"title": "AllMeet", "subtitle": "컨플루언스 조회 결과"}, widgets, include_action_response=include_action_response)
 
 
-def build_confluence_edit_space_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
+def build_confluence_edit_space_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    current_space_key: str = "",
+) -> dict[str, Any]:
     widgets = [
-        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
-        {"textInput": {"name": "confluence_space_key", "label": "스페이스 키 (예: PLATFORM)"}},
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_conf_load_edit_space"}}}]}},
+        {"textInput": {"name": "confluence_space_key", "label": "스페이스 키 (예: PLATFORM)", "value": current_space_key}},
         {"buttonList": {"buttons": [{"text": "수정", "onClick": {"action": {"function": "wm_conf_do_edit_space"}}}]}},
         {"buttonList": {"buttons": [{"text": "컨플루언스 설정으로 돌아가기", "onClick": {"action": {"function": "wm_open_conf_menu"}}}]}}
     ]
     return _wrap_card("wm_conf_edit_space", {"title": "AllMeet", "subtitle": "컨플루언스 설정 > 스페이스 수정"}, widgets, include_action_response=include_action_response)
 
 
-def build_confluence_edit_root_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
+def build_confluence_edit_root_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    current_root_page_ids: str = "",
+) -> dict[str, Any]:
     widgets = [
-        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
-        {"textInput": {"name": "root_page_ids", "label": "루트 페이지 ID 목록", "type": "MULTIPLE_LINE", "hintText": "한 줄에 하나씩 입력"}},
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_conf_load_edit_root"}}}]}},
+        {"textInput": {"name": "root_page_ids", "label": "루트 페이지 ID 목록", "type": "MULTIPLE_LINE", "hintText": "한 줄에 하나씩 입력", "value": current_root_page_ids}},
         {"buttonList": {"buttons": [{"text": "수정", "onClick": {"action": {"function": "wm_conf_do_edit_root"}}}]}},
         {"buttonList": {"buttons": [{"text": "컨플루언스 설정으로 돌아가기", "onClick": {"action": {"function": "wm_open_conf_menu"}}}]}}
     ]
     return _wrap_card("wm_conf_edit_root", {"title": "AllMeet", "subtitle": "컨플루언스 설정 > 폴더 구조 수정"}, widgets, include_action_response=include_action_response)
 
 
-def build_confluence_edit_template_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
+def build_confluence_edit_template_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    current_template_page_url: str = "",
+) -> dict[str, Any]:
     widgets = [
-        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
-        {"textInput": {"name": "template_page_url", "label": "템플릿 URL 또는 Page ID"}},
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_conf_load_edit_template"}}}]}},
+        {"textInput": {"name": "template_page_url", "label": "템플릿 URL 또는 Page ID", "value": current_template_page_url}},
         {"buttonList": {"buttons": [{"text": "수정", "onClick": {"action": {"function": "wm_conf_do_edit_template"}}}]}},
         {"buttonList": {"buttons": [{"text": "컨플루언스 설정으로 돌아가기", "onClick": {"action": {"function": "wm_open_conf_menu"}}}]}}
     ]
     return _wrap_card("wm_conf_edit_template", {"title": "AllMeet", "subtitle": "컨플루언스 설정 > 템플릿 수정"}, widgets, include_action_response=include_action_response)
+
+
+def build_confluence_edit_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    current_space_key: str = "",
+    current_root_page_ids: str = "",
+    current_template_page_url: str = "",
+) -> dict[str, Any]:
+    widgets = [
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_conf_load_edit"}}}]}},
+        {"textInput": {"name": "confluence_space_key", "label": "스페이스 키 (예: PLATFORM)", "value": current_space_key}},
+        {"textInput": {"name": "root_page_ids", "label": "루트 페이지 ID 목록", "type": "MULTIPLE_LINE", "hintText": "한 줄에 하나씩 입력", "value": current_root_page_ids}},
+        {"textInput": {"name": "template_page_url", "label": "템플릿 URL 또는 Page ID", "value": current_template_page_url}},
+        {"buttonList": {"buttons": [{"text": "수정", "onClick": {"action": {"function": "wm_conf_do_edit"}}}]}},
+        {"buttonList": {"buttons": [{"text": "컨플루언스 설정으로 돌아가기", "onClick": {"action": {"function": "wm_open_conf_menu"}}}]}}
+    ]
+    return _wrap_card("wm_conf_edit", {"title": "AllMeet", "subtitle": "컨플루언스 설정 > 수정"}, widgets, include_action_response=include_action_response)
 
 
 def build_scheduler_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
