@@ -23,3 +23,10 @@ key.json
 Thumbs.db
 
 *.log
+
+# Claude 작업용 로컬 문서 (저장소에 push X, 로컬에만 유지)
+CLAUDE.md
+CONVENTIONS.md
+DWD_GUIDE.md
+ROADMAP.md
+SETUP.md
