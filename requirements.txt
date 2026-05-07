@@ -1,7 +1,7 @@
 # Cloud Run / Functions Framework: main.py hello_http entry (see Procfile web).
 functions-framework>=3.0,<4
 
-# Vertex AI Gemini for domains/daily_chat. Keep sync responses fast (Chat ~30s limit).
+# Vertex AI Gemini for domains/daily_chat, domains/weekly_report.
 google-cloud-aiplatform>=1.38.0
 
 # Google Search grounding (domains/daily_chat — 주가·뉴스 등 실시간 정보)
@@ -9,5 +9,12 @@ google-genai>=1.0.0
 
 # Firestore (firestore/ — 문서 쓰기·클라이언트)
 google-cloud-firestore>=2.16.0
+
+# Google API 공통 — Calendar/Drive/Gmail/Chat REST 호출 + OAuth 사용자 동의.
+google-auth>=2.0
+google-auth-oauthlib>=1.0
+
+# HTTP — Confluence REST + 단순 외부 호출.
+requests>=2.30
 
 # Python version: must match runtime.txt (python-3.12).

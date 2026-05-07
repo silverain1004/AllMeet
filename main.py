@@ -20,6 +20,7 @@ from domains.daily_chat import reply_daily_chat, welcome_with_capabilities_text
 from domains.expert_finder import handle_expert_finder
 from domains.schedule_management import handle_schedule_management
 from domains.weekly_meeting import handle_weekly_meeting, handle_weekly_meeting_action
+from domains.weekly_report import handle_weekly_report_draft
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class UserIntent(str, Enum):
     EXPERT_FINDER = "expert_finder"
     SCHEDULE_MANAGEMENT = "schedule_management"
     WEEKLY_MEETING = "weekly_meeting"
+    WEEKLY_REPORT_DRAFT = "weekly_report_draft"
 
 
 def match_user_intent(user_message: str) -> UserIntent:
@@ -50,6 +52,8 @@ def match_user_intent(user_message: str) -> UserIntent:
     if not text:
         return UserIntent.DAILY_CHAT
 
+    if _weekly_report_draft_like(text):
+        return UserIntent.WEEKLY_REPORT_DRAFT
     if _weekly_meeting_like(text):
         return UserIntent.WEEKLY_MEETING
     if _schedule_like(text):
@@ -58,6 +62,19 @@ def match_user_intent(user_message: str) -> UserIntent:
         return UserIntent.EXPERT_FINDER
 
     return UserIntent.DAILY_CHAT
+
+
+def _weekly_report_draft_like(text: str) -> bool:
+    """주간보고초안 트리거 — `_weekly_meeting_like` 보다 먼저 매칭 (더 구체적)."""
+    keywords = (
+        "주간보고초안",
+        "주간 보고 초안",
+        "주간보고 초안",
+        "a함수호출",
+        "a 함수호출",
+        "a 함수 호출",
+    )
+    return any(k in text for k in keywords)
 
 
 def _weekly_meeting_like(text: str) -> bool:
@@ -158,6 +175,9 @@ def _dispatch_by_intent(
         case UserIntent.WEEKLY_MEETING:
             # 주간 회의·팀/인원 등록: 샘플 cardsV2 (domains.weekly_meeting)
             return handle_weekly_meeting(user_message, chat_event=payload)
+        case UserIntent.WEEKLY_REPORT_DRAFT:
+            # 주간보고초안: 즉시 응답 + 백그라운드 thread 가 데이터 수집·Vertex 분석 후 push
+            return handle_weekly_report_draft(user_message, chat_event=payload)
         case _:
             # Enum 전수 매칭이므로 이론상 도달하지 않음 — 폴백으로 일상 대화
             return reply_daily_chat(user_message, chat_event=payload)
@@ -193,6 +213,16 @@ def _parse_form_inputs(payload: dict[str, Any]) -> dict[str, Any]:
 def hello_http(request):
     """Cloud Run / Functions Framework HTTP 엔드포인트."""
     if request.method == "GET":
+        # OAuth 동의 callback (Phase 2): /oauth/callback?code=...&state=...
+        try:
+            path = (request.path or "").rstrip("/")
+        except Exception:
+            path = ""
+        if path == "/oauth/callback":
+            from domains.weekly_meeting.oauth_callback import handle_oauth_callback
+
+            return handle_oauth_callback(request)
+
         body = {
             "status": "ok",
             "service": "all-meet-agent",

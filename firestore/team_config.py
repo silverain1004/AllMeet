@@ -10,13 +10,55 @@ from .writes import get_client
 
 _CONFIG_COLLECTION = "config"
 _TEAM_LIST_DOC = "team_list"
+GLOBAL_SETTING_FIELDS = {
+    "user_email",
+    "api_token",
+    "confluence_url",
+    "page_restrict_to_email",
+    "page_restrict_account_id",
+}
+TEAM_ROW_FIXED_FIELDS = {
+    "id",
+    "name",
+    "calendar_id",
+    "space_key",
+    "confluence_space_key",
+    "report_root_page_id",
+    "root_pages",
+    "template_page_url",
+    "template_page_id",
+}
+TEAM_SETTING_FIELDS = {
+    "calendar_id",
+    "confluence_space_key",
+    "report_root_page_id",
+    "space_key",
+    "root_pages",
+    "template_page_url",
+    "template_page_id",
+}
+
+
+def normalize_team_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = re.sub(r"[^A-Za-z0-9]+", "", text).upper()
+    if normalized in {"PC2", "MES2"}:
+        return normalized
+    return normalized or text.upper()
 
 
 def make_team_id(team_name: str) -> str:
-    base = (team_name or "").strip().lower()
-    base = re.sub(r"[^\w\u3130-\u318f\uac00-\ud7af]+", "_", base)
+    raw = (team_name or "").strip()
+    compact = re.sub(r"\s+", "", raw).upper()
+    if "PC2" in compact:
+        return "PC2"
+    if "MES2" in compact:
+        return "MES2"
+    base = re.sub(r"[^\w\u3130-\u318f\uac00-\ud7af]+", "_", raw)
     base = re.sub(r"_+", "_", base).strip("_")
-    return base or "weekly_report"
+    return normalize_team_id(base or "TEAM")
 
 
 def parse_template_page_id(template_page_url: str) -> str | None:
@@ -54,7 +96,7 @@ def parse_confluence_space_key(text_value: str) -> str | None:
 
 def parse_team_members(raw_value: str) -> list[dict[str, str]]:
     parts = [p.strip() for p in re.split(r"[,\n]", raw_value or "") if p.strip()]
-    return [{"name": name, "nickname": ""} for name in parts]
+    return [{"name": name, "nickname": [], "email": ""} for name in parts]
 
 
 def parse_root_page_ids(raw_value: str) -> list[dict[str, Any]]:
@@ -86,7 +128,62 @@ def _normalized_user_context(user_context: dict[str, Any] | None) -> dict[str, s
     }
 
 
+def _empty_team_row(team_id: str, team_name: str) -> dict[str, Any]:
+    return {
+        "id": team_id,
+        "name": (team_name or team_id).strip() or team_id,
+        "calendar_id": "",
+        "space_key": "",
+        "confluence_space_key": "",
+        "report_root_page_id": "",
+        "root_pages": [],
+        "template_page_url": "",
+        "template_page_id": "",
+    }
+
+
+def _normalize_team_row(row: dict[str, Any], *, team_id: str, team_name: str) -> dict[str, Any]:
+    base = _empty_team_row(team_id, team_name)
+    for key in TEAM_ROW_FIXED_FIELDS:
+        if key in row:
+            base[key] = row.get(key)
+    base["id"] = team_id
+    base["name"] = (str(base.get("name") or "").strip() or team_name or team_id).strip()
+    base["root_pages"] = base.get("root_pages") if isinstance(base.get("root_pages"), list) else []
+    for key in ("calendar_id", "space_key", "confluence_space_key", "report_root_page_id", "template_page_url", "template_page_id"):
+        base[key] = str(base.get(key) or "").strip()
+    return base
+
+
+def _read_team_list_doc() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    db = get_client()
+    ref = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC)
+    snap = ref.get()
+    if not snap.exists:
+        return {}, []
+    data = snap.to_dict() or {}
+    teams = [t for t in (data.get("teams") or []) if isinstance(t, dict)]
+    return data, teams
+
+
+def get_global_settings() -> dict[str, Any]:
+    data, _ = _read_team_list_doc()
+    global_data = data.get("global")
+    if not isinstance(global_data, dict):
+        return {}
+    return {k: global_data.get(k) for k in GLOBAL_SETTING_FIELDS if k in global_data}
+
+
+def upsert_global_settings(updates: dict[str, Any]) -> None:
+    clean = {k: updates.get(k) for k in GLOBAL_SETTING_FIELDS if k in (updates or {})}
+    if not clean:
+        return
+    db = get_client()
+    db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC).set({"global": clean}, merge=True)
+
+
 def _upsert_team_list(team_id: str, team_name: str) -> None:
+    team_id = normalize_team_id(team_id)
     db = get_client()
     ref = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC)
     snap = ref.get()
@@ -96,15 +193,99 @@ def _upsert_team_list(team_id: str, team_name: str) -> None:
     else:
         teams = []
 
-    exists = any((t.get("id") == team_id) for t in teams if isinstance(t, dict))
+    updated = False
+    exists = False
+    for item in teams:
+        if not isinstance(item, dict):
+            continue
+        if normalize_team_id(item.get("id", "")) != team_id:
+            continue
+        exists = True
+        normalized = _normalize_team_row(item, team_id=team_id, team_name=team_name)
+        if normalized != item:
+            item.clear()
+            item.update(normalized)
+            updated = True
+        break
     if not exists:
-        teams.append({"id": team_id, "name": team_name})
+        teams.append(_empty_team_row(team_id, team_name))
+        updated = True
+    if updated:
         ref.set({"teams": teams}, merge=True)
+
+
+def _get_team_list_entry(team_id: str) -> dict[str, Any] | None:
+    team_id = normalize_team_id(team_id)
+    if not team_id:
+        return None
+    db = get_client()
+    snap = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC).get()
+    if not snap.exists:
+        return None
+    data = snap.to_dict() or {}
+    for item in data.get("teams") or []:
+        if not isinstance(item, dict):
+            continue
+        if normalize_team_id(item.get("id", "")) == team_id:
+            return item
+    return None
+
+
+def get_team_settings(team_id: str) -> dict[str, Any]:
+    entry = _get_team_list_entry(team_id)
+    if not entry:
+        return {}
+    out: dict[str, Any] = {}
+    for key in TEAM_SETTING_FIELDS:
+        if key in entry:
+            out[key] = entry.get(key)
+    return out
+
+
+def upsert_team_settings(team_id: str, team_name: str, updates: dict[str, Any]) -> None:
+    team_id = normalize_team_id(team_id)
+    db = get_client()
+    ref = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC)
+    snap = ref.get()
+    if snap.exists:
+        data = snap.to_dict() or {}
+        teams = list(data.get("teams") or [])
+    else:
+        teams = []
+
+    row_updates = {k: v for k, v in (updates or {}).items() if k in TEAM_SETTING_FIELDS}
+    global_updates = {k: v for k, v in (updates or {}).items() if k in GLOBAL_SETTING_FIELDS}
+    found = False
+    for item in teams:
+        if not isinstance(item, dict):
+            continue
+        if normalize_team_id(item.get("id", "")) != team_id:
+            continue
+        found = True
+        merged_row = dict(item)
+        merged_row.update(row_updates)
+        normalized = _normalize_team_row(merged_row, team_id=team_id, team_name=team_name)
+        item.clear()
+        item.update(normalized)
+        break
+    if not found:
+        row: dict[str, Any] = _empty_team_row(team_id, team_name)
+        row.update(row_updates)
+        row = _normalize_team_row(row, team_id=team_id, team_name=team_name)
+        teams.append(row)
+    ref.set({"teams": teams}, merge=True)
+    if global_updates:
+        upsert_global_settings(global_updates)
 
 
 def get_team_list() -> list[dict[str, str]]:
     """team_list 문서를 우선 사용하고, 없으면 config 문서들에서 폴백 생성."""
     db = get_client()
+    existing_doc_ids = {
+        normalize_team_id(doc.id)
+        for doc in db.collection(_CONFIG_COLLECTION).stream()
+        if doc.id != _TEAM_LIST_DOC
+    }
     ref = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC)
     snap = ref.get()
     teams: list[dict[str, str]] = []
@@ -113,9 +294,9 @@ def get_team_list() -> list[dict[str, str]]:
         for item in data.get("teams") or []:
             if not isinstance(item, dict):
                 continue
-            team_id = str(item.get("id") or "").strip()
+            team_id = normalize_team_id(str(item.get("id") or ""))
             team_name = str(item.get("name") or "").strip()
-            if team_id and team_name:
+            if team_id and team_name and team_id in existing_doc_ids:
                 teams.append({"id": team_id, "name": team_name})
     if teams:
         return teams
@@ -127,39 +308,72 @@ def get_team_list() -> list[dict[str, str]]:
         data = doc.to_dict() or {}
         team_name = str(data.get("team_name") or doc.id).strip()
         if team_name:
-            teams.append({"id": doc.id, "name": team_name})
+            teams.append({"id": normalize_team_id(doc.id), "name": team_name})
     teams.sort(key=lambda x: x["name"])
     return teams
 
 
 def rename_team_in_list(team_id: str, new_team_name: str) -> None:
     """team_list에서 팀 이름을 갱신합니다."""
+    team_id = normalize_team_id(team_id)
     new_name = (new_team_name or "").strip()
     if not new_name:
         return
-    teams = get_team_list()
+    db = get_client()
+    ref = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC)
+    snap = ref.get()
+    if not snap.exists:
+        return
+    data = snap.to_dict() or {}
+    teams = list(data.get("teams") or [])
     changed = False
-    for team in teams:
-        if team.get("id") == team_id:
-            team["name"] = new_name
-            changed = True
-            break
+    for item in teams:
+        if not isinstance(item, dict):
+            continue
+        if normalize_team_id(item.get("id", "")) != team_id:
+            continue
+        item["name"] = new_name
+        changed = True
+        break
     if changed:
-        get_client().collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC).set({"teams": teams}, merge=True)
+        ref.set({"teams": teams}, merge=True)
 
 
 def remove_team_from_list(team_id: str) -> None:
     """team_list에서 팀 항목을 제거합니다."""
-    teams = [t for t in get_team_list() if t.get("id") != team_id]
-    get_client().collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC).set({"teams": teams}, merge=True)
+    team_id = normalize_team_id(team_id)
+    db = get_client()
+    ref = db.collection(_CONFIG_COLLECTION).document(_TEAM_LIST_DOC)
+    snap = ref.get()
+    if not snap.exists:
+        return
+    data = snap.to_dict() or {}
+    teams = [
+        item
+        for item in (data.get("teams") or [])
+        if isinstance(item, dict) and normalize_team_id(item.get("id", "")) != team_id
+    ]
+    ref.set({"teams": teams}, merge=True)
 
 
 def get_team_config(team_id: str) -> dict[str, Any] | None:
+    team_id = normalize_team_id(team_id)
     db = get_client()
     snap = db.collection(_CONFIG_COLLECTION).document(team_id).get()
     if not snap.exists:
         return None
-    return snap.to_dict() or {}
+    out = snap.to_dict() or {}
+    entry = _get_team_list_entry(team_id) or {}
+    for key in TEAM_SETTING_FIELDS:
+        if key in entry:
+            out[key] = entry.get(key)
+    global_settings = get_global_settings()
+    for key in GLOBAL_SETTING_FIELDS:
+        if key in global_settings:
+            out[key] = global_settings.get(key)
+    if entry.get("name") and not out.get("team_name"):
+        out["team_name"] = str(entry.get("name") or "").strip()
+    return out
 
 
 def upsert_team_config(
@@ -170,10 +384,15 @@ def upsert_team_config(
     user_context: dict[str, Any] | None,
     updates: dict[str, Any],
 ) -> dict[str, Any]:
+    team_id = normalize_team_id(team_id)
     db = get_client()
     ref = db.collection(_CONFIG_COLLECTION).document(team_id)
     snap = ref.get()
     now = datetime.utcnow()
+
+    raw_updates = updates or {}
+    member_updates = {k: v for k, v in raw_updates.items() if k not in TEAM_SETTING_FIELDS}
+    settings_updates = {k: v for k, v in raw_updates.items() if k in TEAM_SETTING_FIELDS}
 
     payload: dict[str, Any] = {
         "team_name": (team_name or "").strip(),
@@ -181,7 +400,7 @@ def upsert_team_config(
         "user_context": _normalized_user_context(user_context),
         "updated_at": now,
     }
-    payload.update(updates)
+    payload.update(member_updates)
 
     if snap.exists:
         ref.set(payload, merge=True)
@@ -190,6 +409,8 @@ def upsert_team_config(
         ref.set(payload, merge=True)
 
     _upsert_team_list(team_id, team_name)
+    if settings_updates:
+        upsert_team_settings(team_id, team_name, settings_updates)
     return ref.get().to_dict() or {}
 
 
@@ -201,6 +422,7 @@ def update_team_name(
     user_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """팀 이름을 변경하고 team_list도 동기화합니다."""
+    team_id = normalize_team_id(team_id)
     existing = get_team_config(team_id)
     if not existing:
         raise ValueError("존재하지 않는 팀입니다.")
@@ -217,6 +439,7 @@ def update_team_name(
 
 def delete_team(team_id: str) -> bool:
     """팀 문서를 삭제하고 team_list에서 제거합니다."""
+    team_id = normalize_team_id(team_id)
     db = get_client()
     ref = db.collection(_CONFIG_COLLECTION).document(team_id)
     snap = ref.get()
@@ -225,3 +448,87 @@ def delete_team(team_id: str) -> bool:
     ref.delete()
     remove_team_from_list(team_id)
     return True
+
+
+def update_team_calendar_id(
+    *,
+    team_id: str,
+    calendar_id: str,
+    space_id: str,
+    user_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """팀의 Google Calendar ID를 갱신합니다."""
+    team_id = normalize_team_id(team_id)
+    existing = get_team_config(team_id)
+    if not existing:
+        raise ValueError("존재하지 않는 팀입니다.")
+    team_name = str(existing.get("team_name") or team_id)
+    return upsert_team_config(
+        team_id=team_id,
+        team_name=team_name,
+        space_id=space_id,
+        user_context=user_context,
+        updates={"calendar_id": (calendar_id or "").strip()},
+    )
+
+
+# ---------------------------------------------------------------------------
+# weekly_report 도메인 진입용 — 이메일 → 팀 매칭 / 글로벌 토큰
+# ---------------------------------------------------------------------------
+
+
+def get_team_from_index(team_id: str) -> dict[str, Any] | None:
+    """`config/team_list.teams[]` 의 row 반환. ``_get_team_list_entry`` 의 public alias."""
+    return _get_team_list_entry(team_id)
+
+
+def find_team_by_email(email: str) -> str | None:
+    """이메일이 속한 팀 ID 1개 (여러 팀에 있으면 첫 번째 발견)."""
+    if not email:
+        return None
+    needle = email.strip().lower()
+    db = get_client()
+    docs = db.collection(_CONFIG_COLLECTION).stream()
+    for doc in docs:
+        if doc.id == _TEAM_LIST_DOC:
+            continue
+        data = doc.to_dict() or {}
+        members = data.get("team_members") or []
+        for m in members:
+            if isinstance(m, dict) and str(m.get("email") or "").strip().lower() == needle:
+                return doc.id
+    return None
+
+
+def find_all_teams_by_email(email: str) -> list[str]:
+    """이메일이 속한 모든 팀 ID 리스트 (OAuth 동의/철회 sync 용)."""
+    if not email:
+        return []
+    needle = email.strip().lower()
+    db = get_client()
+    docs = db.collection(_CONFIG_COLLECTION).stream()
+    result: list[str] = []
+    for doc in docs:
+        if doc.id == _TEAM_LIST_DOC:
+            continue
+        data = doc.to_dict() or {}
+        members = data.get("team_members") or []
+        for m in members:
+            if isinstance(m, dict) and str(m.get("email") or "").strip().lower() == needle:
+                result.append(doc.id)
+                break
+    return result
+
+
+def get_token_for(user_email: str = "") -> dict[str, str]:
+    """사용자 이메일이 사용할 Confluence 인증 정보.
+
+    현재 모델: 글로벌 1개 토큰 (`config/team_list.global`). 미래에 팀별로 나뉘면
+    이 함수만 교체 (호출 인터페이스 유지).
+    """
+    g = get_global_settings()
+    return {
+        "url": str(g.get("confluence_url") or "").strip().rstrip("/"),
+        "user_email": str(g.get("user_email") or "").strip(),
+        "api_token": str(g.get("api_token") or "").strip(),
+    }

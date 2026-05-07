@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 import re
 from typing import Any
 
 from domains.weekly_meeting.cards import (
+    build_confluence_edit_card,
     build_confluence_edit_template_card,
     build_confluence_edit_root_card,
     build_confluence_edit_space_card,
     build_confluence_menu_card,
     build_confluence_view_result_card,
     build_confluence_view_select_card,
+    build_oauth_link_card,
     build_schedule_menu_card,
+    build_schedule_calendar_id_card,
     build_schedule_result_card,
     build_scheduler_card,
     build_scheduler_result_card,
@@ -35,11 +39,13 @@ from firestore.team_config import (
     delete_team,
     get_team_config,
     get_team_list,
+    normalize_team_id,
     parse_confluence_space_key,
     parse_root_page_ids,
     parse_template_page_id,
     rename_team_in_list,
     update_team_name,
+    update_team_calendar_id,
     upsert_team_config,
 )
 
@@ -58,7 +64,9 @@ def _safe_form_value(form_inputs: dict[str, Any], key: str) -> str:
 
 def _safe_team_id(form_inputs: dict[str, Any]) -> str:
     team_id = _safe_form_value(form_inputs, "team_id")
-    return "" if team_id == "__none__" else team_id
+    if team_id == "__none__":
+        return ""
+    return normalize_team_id(team_id)
 
 
 def _normalize_nicknames(raw_value: str) -> list[str]:
@@ -80,7 +88,8 @@ def _normalize_members(raw_members: Any) -> list[dict[str, Any]]:
             nicknames = [str(n).strip() for n in raw_nick if str(n).strip()]
         else:
             nicknames = _normalize_nicknames(str(raw_nick or ""))
-        out.append({"name": name, "nickname": nicknames})
+        email = str(member.get("email") or "").strip()
+        out.append({"name": name, "nickname": nicknames, "email": email})
     return out
 
 
@@ -106,17 +115,60 @@ def _space_id(chat_event: dict[str, Any]) -> str:
 
 
 def _calendar_id(existing: dict[str, Any]) -> str:
-    return str(existing.get("calendar_id") or "primary")
+    return str(existing.get("calendar_id") or "").strip()
 
 
 def _schedule_lines(events: list[dict[str, str]]) -> list[str]:
+    kst = timezone(timedelta(hours=9))
+
+    def _parse_calendar_dt(raw: str) -> datetime | None:
+        text = (raw or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                dt = datetime.strptime(text, "%Y-%m-%d")
+                dt = dt.replace(tzinfo=kst)
+            except ValueError:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=kst)
+        return dt.astimezone(kst)
+
     lines: list[str] = []
     for i, e in enumerate(events, start=1):
         summary = e.get("summary", "-")
         start = e.get("start", "-")
         end = e.get("end", "-")
-        lines.append(f"{i}. {summary}<br>&nbsp;&nbsp;일자: {start} ~ {end}")
+        start_dt = _parse_calendar_dt(start)
+        end_dt = _parse_calendar_dt(end)
+        if start_dt and end_dt:
+            start_date = start_dt.strftime("%Y-%m-%d")
+            start_time = start_dt.strftime("%H:%M")
+            end_date = end_dt.strftime("%Y-%m-%d")
+            end_time = end_dt.strftime("%H:%M")
+            if start_date == end_date:
+                when = f"{start_date} {start_time} - {end_time}"
+            else:
+                when = f"{start_date} {start_time} - {end_date} {end_time}"
+        else:
+            when = f"{start} ~ {end}"
+        lines.append(f"{i}. {summary}<br>&nbsp;&nbsp;일자: {when}")
     return lines
+
+
+def _schedule_error_lines(error_kind: str, team_name: str) -> list[str]:
+    if error_kind == "calendar_not_found":
+        return [f"{team_name} 팀 캘린더를 찾을 수 없습니다."]
+    if error_kind == "calendar_auth_error":
+        return ["캘린더 인증/권한 오류가 발생했습니다."]
+    if error_kind == "calendar_http_error":
+        return ["캘린더 API 호출에 실패했습니다."]
+    return ["캘린더 조회 중 오류가 발생했습니다."]
 
 
 def handle_weekly_meeting(user_message: str, chat_event: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -140,6 +192,8 @@ def handle_weekly_meeting_action(
         return build_weekly_meeting_menu_card(include_action_response=True)
     if invoked_function == "wm_open_schedule_menu":
         return build_schedule_menu_card(get_team_list(), include_action_response=True)
+    if invoked_function == "wm_schedule_open_calendar_id":
+        return build_schedule_calendar_id_card(get_team_list(), include_action_response=True)
     if invoked_function == "wm_open_team_menu":
         return build_team_setting_menu_card(include_action_response=True)
     if invoked_function == "wm_open_member_menu":
@@ -155,19 +209,25 @@ def handle_weekly_meeting_action(
         existing, team_name = _team_required(team_id)
         if not existing:
             return {"text": "팀을 선택해 주세요."}
+        calendar_id = _calendar_id(existing)
+        if not calendar_id:
+            return build_schedule_result_card(
+                "주간회의 일정 조회",
+                [f"{team_name} 팀의 Calendar ID가 없습니다. '캘린더 ID 설정'에서 먼저 저장해 주세요."],
+                include_action_response=True,
+            )
         result = lookup_weekly_meeting(
             team_name=team_name,
             is_next_week=(invoked_function == "wm_schedule_meeting_next"),
-            calendar_id=_calendar_id(existing),
+            calendar_id=calendar_id,
         )
         if not result.ok:
-            if result.error_kind == "calendar_not_found":
-                lines = ["캘린더를 찾을 수 없습니다."]
-            else:
-                lines = ["캘린더 조회 중 오류가 발생했습니다."]
+            lines = _schedule_error_lines(result.error_kind, team_name)
             return build_schedule_result_card("주간회의 일정 조회", lines, include_action_response=True)
         title = "주간회의 일정 조회 (다음주)" if invoked_function.endswith("next") else "주간회의 일정 조회 (이번주)"
         lines = _schedule_lines(result.events)
+        if not lines:
+            lines = [f"{team_name} 팀 주간회의 일정이 없습니다."]
         return build_schedule_result_card(title, lines, include_action_response=True)
 
     if invoked_function in {"wm_schedule_vacation_this", "wm_schedule_vacation_next"}:
@@ -175,26 +235,51 @@ def handle_weekly_meeting_action(
         existing, team_name = _team_required(team_id)
         if not existing:
             return {"text": "팀을 선택해 주세요."}
+        calendar_id = _calendar_id(existing)
+        if not calendar_id:
+            return build_schedule_result_card(
+                "팀원 휴가일정 조회",
+                [f"{team_name} 팀의 Calendar ID가 없습니다. '캘린더 ID 설정'에서 먼저 저장해 주세요."],
+                include_action_response=True,
+            )
         members = _normalize_members(existing.get("team_members"))
         keywords: list[str] = []
         for m in members:
             keywords.append(str(m.get("name") or ""))
             for nick in m.get("nickname") or []:
                 keywords.append(str(nick))
+            email = str(m.get("email") or "").strip()
+            if email:
+                keywords.append(email)
         result = lookup_member_vacation(
             member_keywords=keywords,
             is_next_week=(invoked_function == "wm_schedule_vacation_next"),
-            calendar_id=_calendar_id(existing),
+            calendar_id=calendar_id,
         )
         if not result.ok:
-            if result.error_kind == "calendar_not_found":
-                lines = ["캘린더를 찾을 수 없습니다."]
-            else:
-                lines = ["캘린더 조회 중 오류가 발생했습니다."]
+            lines = _schedule_error_lines(result.error_kind, team_name)
             return build_schedule_result_card("팀원 휴가일정 조회", lines, include_action_response=True)
         title = f"{team_name} 팀원 휴가일정 (다음주)" if invoked_function.endswith("next") else f"{team_name} 팀원 휴가일정 (이번주)"
         lines = _schedule_lines(result.events)
+        if not lines:
+            lines = [f"{team_name} 팀원 휴가일정이 없습니다."]
         return build_schedule_result_card(title, lines, include_action_response=True)
+
+    if invoked_function == "wm_schedule_save_calendar_id":
+        team_id = _safe_team_id(form_inputs)
+        existing, team_name = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        calendar_id = _safe_form_value(form_inputs, "calendar_id")
+        if not calendar_id:
+            return {"text": "Calendar ID를 입력해 주세요."}
+        update_team_calendar_id(
+            team_id=team_id,
+            calendar_id=calendar_id,
+            space_id=space_id,
+            user_context=user_context,
+        )
+        return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ {team_name} 팀 Calendar ID가 저장되었습니다: {calendar_id}"}
 
     # 팀 설정
     if invoked_function == "wm_team_open_list":
@@ -207,10 +292,10 @@ def handle_weekly_meeting_action(
         return build_team_delete_card(get_team_list(), include_action_response=True)
 
     if invoked_function == "wm_team_do_add":
-        team_id = _safe_form_value(form_inputs, "new_team_id").lower()
+        team_id = normalize_team_id(_safe_form_value(form_inputs, "new_team_id"))
         team_name = _safe_form_value(form_inputs, "new_team_name")
-        if not re.fullmatch(r"[a-z0-9_-]+", team_id or ""):
-            return {"text": "팀 ID는 영문 소문자/숫자/_/- 형식으로 입력해 주세요."}
+        if not re.fullmatch(r"[A-Z0-9]+", team_id or ""):
+            return {"text": "팀 ID는 영문/숫자 형식으로 입력해 주세요. (예: PC2, MES2)"}
         if not team_name:
             return {"text": "팀 이름을 입력해 주세요."}
         if get_team_config(team_id):
@@ -224,15 +309,52 @@ def handle_weekly_meeting_action(
         )
         return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ 팀이 추가되었습니다: {team_name} (config/{team_id})"}
 
+    if invoked_function == "wm_team_load_edit":
+        team_id = _safe_team_id(form_inputs)
+        existing, team_name = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        return build_team_edit_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            current_team_name=team_name,
+            current_calendar_id=str(existing.get("calendar_id") or ""),
+        )
+
     if invoked_function == "wm_team_do_edit":
         team_id = _safe_team_id(form_inputs)
         new_team_name = _safe_form_value(form_inputs, "new_team_name")
+        calendar_id = _safe_form_value(form_inputs, "calendar_id")
         if not team_id:
             return {"text": "팀을 선택해 주세요."}
-        if not new_team_name:
-            return {"text": "새 팀 이름을 입력해 주세요."}
-        update_team_name(team_id=team_id, new_team_name=new_team_name, space_id=space_id, user_context=user_context)
-        return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ 팀 이름이 수정되었습니다: {new_team_name}"}
+        existing = get_team_config(team_id) or {}
+        if not existing:
+            return {"text": "수정할 팀을 찾지 못했습니다."}
+        current_team_name = str(existing.get("team_name") or team_id)
+        target_team_name = new_team_name or current_team_name
+        if not new_team_name and not calendar_id:
+            return {"text": "수정할 값(팀 이름 또는 Calendar ID)을 입력해 주세요."}
+
+        updates: dict[str, Any] = {}
+        if calendar_id:
+            updates["calendar_id"] = calendar_id
+        upsert_team_config(
+            team_id=team_id,
+            team_name=target_team_name,
+            space_id=space_id,
+            user_context=user_context,
+            updates=updates,
+        )
+        if new_team_name:
+            rename_team_in_list(team_id, new_team_name)
+
+        changed_fields: list[str] = []
+        if new_team_name:
+            changed_fields.append(f"팀 이름: {new_team_name}")
+        if calendar_id:
+            changed_fields.append(f"Calendar ID: {calendar_id}")
+        return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": "✅ 팀 설정이 수정되었습니다. " + ", ".join(changed_fields)}
 
     if invoked_function == "wm_team_do_delete":
         team_id = _safe_team_id(form_inputs)
@@ -272,10 +394,38 @@ def handle_weekly_meeting_action(
         if not member_name:
             return {"text": "팀원 이름을 입력해 주세요."}
         nicknames = _normalize_nicknames(_safe_form_value(form_inputs, "member_nicknames"))
+        member_email = _safe_form_value(form_inputs, "member_email")
         members = _normalize_members(existing.get("team_members"))
-        members.append({"name": member_name, "nickname": nicknames})
+        members.append({"name": member_name, "nickname": nicknames, "email": member_email})
         upsert_team_config(team_id=team_id, team_name=team_name, space_id=space_id, user_context=user_context, updates={"team_members": members})
         return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ {team_name} 팀에 팀원 {member_name} 님을 추가했습니다."}
+
+    if invoked_function == "wm_tm_load_edit":
+        team_id = _safe_team_id(form_inputs)
+        existing, _ = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        raw_index = _safe_form_value(form_inputs, "member_index")
+        if not raw_index.isdigit():
+            return {"text": "팀원 번호를 입력해 주세요."}
+        idx = int(raw_index) - 1
+        members = _normalize_members(existing.get("team_members"))
+        if idx < 0 or idx >= len(members):
+            return {"text": "팀원 번호 범위를 확인해 주세요."}
+        selected = members[idx]
+        nicks = ", ".join(selected.get("nickname") or [])
+        email = str(selected.get("email") or "").strip()
+        snapshot = f"현재값: {selected.get('name','')} (닉네임: {nicks or '-'} / 이메일: {email or '-'})"
+        return build_team_member_edit_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            selected_member_index=raw_index,
+            current_member_name=str(selected.get("name") or ""),
+            current_member_nicknames=nicks,
+            current_member_email=str(selected.get("email") or ""),
+            member_snapshot_text=snapshot,
+        )
 
     if invoked_function == "wm_tm_do_edit":
         team_id = _safe_team_id(form_inputs)
@@ -291,10 +441,13 @@ def handle_weekly_meeting_action(
             return {"text": "팀원 번호 범위를 확인해 주세요."}
         new_name = _safe_form_value(form_inputs, "new_member_name")
         new_nicknames = _safe_form_value(form_inputs, "new_member_nicknames")
+        new_email = _safe_form_value(form_inputs, "new_member_email")
         if new_name:
             members[idx]["name"] = new_name
         if new_nicknames:
             members[idx]["nickname"] = _normalize_nicknames(new_nicknames)
+        if new_email:
+            members[idx]["email"] = new_email
         upsert_team_config(team_id=team_id, team_name=team_name, space_id=space_id, user_context=user_context, updates={"team_members": members})
         return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": "✅ 팀원 정보가 수정되었습니다."}
 
@@ -334,12 +487,80 @@ def handle_weekly_meeting_action(
     # 컨플루언스 설정
     if invoked_function == "wm_conf_open_view":
         return build_confluence_view_select_card(get_team_list(), include_action_response=True)
+    if invoked_function == "wm_conf_open_edit":
+        return build_confluence_edit_card(get_team_list(), include_action_response=True)
     if invoked_function == "wm_conf_open_edit_space":
         return build_confluence_edit_space_card(get_team_list(), include_action_response=True)
+    if invoked_function == "wm_conf_load_edit":
+        team_id = _safe_team_id(form_inputs)
+        existing, _ = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        root_pages = existing.get("root_pages") or []
+        root_text_rows: list[str] = []
+        if isinstance(root_pages, list):
+            for row in root_pages:
+                if isinstance(row, dict):
+                    page_id = str(row.get("page_id") or "").strip()
+                    if page_id:
+                        root_text_rows.append(page_id)
+        return build_confluence_edit_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            current_space_key=str(existing.get("confluence_space_key") or ""),
+            current_root_page_ids="\n".join(root_text_rows),
+            current_template_page_url=str(existing.get("template_page_url") or ""),
+        )
+
     if invoked_function == "wm_conf_open_edit_root":
         return build_confluence_edit_root_card(get_team_list(), include_action_response=True)
     if invoked_function == "wm_conf_open_edit_template":
         return build_confluence_edit_template_card(get_team_list(), include_action_response=True)
+
+    if invoked_function == "wm_conf_load_edit_space":
+        team_id = _safe_team_id(form_inputs)
+        existing, _ = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        return build_confluence_edit_space_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            current_space_key=str(existing.get("confluence_space_key") or ""),
+        )
+
+    if invoked_function == "wm_conf_load_edit_root":
+        team_id = _safe_team_id(form_inputs)
+        existing, _ = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        root_pages = existing.get("root_pages") or []
+        root_text_rows: list[str] = []
+        if isinstance(root_pages, list):
+            for row in root_pages:
+                if isinstance(row, dict):
+                    page_id = str(row.get("page_id") or "").strip()
+                    if page_id:
+                        root_text_rows.append(page_id)
+        return build_confluence_edit_root_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            current_root_page_ids="\n".join(root_text_rows),
+        )
+
+    if invoked_function == "wm_conf_load_edit_template":
+        team_id = _safe_team_id(form_inputs)
+        existing, _ = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        return build_confluence_edit_template_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            current_template_page_url=str(existing.get("template_page_url") or ""),
+        )
 
     if invoked_function == "wm_conf_do_view":
         team_id = _safe_team_id(form_inputs)
@@ -408,6 +629,61 @@ def handle_weekly_meeting_action(
         )
         return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ 템플릿이 수정되었습니다. (Page ID: {template_page_id})"}
 
+    if invoked_function == "wm_conf_do_edit":
+        team_id = _safe_team_id(form_inputs)
+        existing, team_name = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+
+        updates: dict[str, Any] = {}
+
+        space_raw = _safe_form_value(form_inputs, "confluence_space_key")
+        if space_raw:
+            space_key = parse_confluence_space_key(space_raw)
+            if not space_key:
+                return {"text": "유효한 스페이스 키를 입력해 주세요."}
+            updates["confluence_space_key"] = space_key
+
+        root_raw = _safe_form_value(form_inputs, "root_page_ids")
+        if root_raw:
+            try:
+                root_pages = parse_root_page_ids(root_raw)
+            except ValueError as e:
+                return {"text": f"루트 페이지 ID 형식이 올바르지 않습니다: {e}"}
+            if not root_pages:
+                return {"text": "루트 페이지 ID를 1개 이상 입력해 주세요."}
+            updates["root_pages"] = root_pages
+
+        template_raw = _safe_form_value(form_inputs, "template_page_url")
+        if template_raw:
+            template_page_id = parse_template_page_id(template_raw)
+            if template_page_id is None:
+                return {"text": "템플릿 URL 형식을 확인해 주세요. (/pages/{id} 또는 숫자 ID)"}
+            updates["template_page_url"] = template_raw
+            updates["template_page_id"] = template_page_id
+
+        if not updates:
+            return {"text": "수정할 값을 하나 이상 입력해 주세요."}
+
+        upsert_team_config(
+            team_id=team_id,
+            team_name=team_name,
+            space_id=space_id,
+            user_context=user_context,
+            updates=updates,
+        )
+        return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": "✅ 컨플루언스 설정이 수정되었습니다."}
+
+    # OAuth 연결 (Phase 2 — Gmail / 개인 Calendar 권한 동의)
+    if invoked_function == "wm_oauth_link":
+        from domains.weekly_meeting.oauth_callback import build_authorization_url
+
+        user_email = str((chat_event.get("user") or {}).get("email") or "")
+        if not user_email:
+            return {"text": "사용자 이메일을 확인하지 못했어요."}
+        url = build_authorization_url(user_email_hint=user_email, state=f"email:{user_email}")
+        return build_oauth_link_card(user_email=user_email, auth_url=url, include_action_response=True)
+
     # 스케줄러
     if invoked_function == "wm_scheduler_test":
         team_id = _safe_team_id(form_inputs)
@@ -422,8 +698,18 @@ def handle_weekly_meeting_action(
         if not result.events:
             return build_scheduler_result_card(f"{team_name} 주간회의일자를 찾을 수 없습니다.", include_action_response=True)
         first = result.events[0]
-        start = str(first.get("start") or "")
+        start = str(first.get("start") or "").strip()
         date_text = start[:10] if len(start) >= 10 else start
+        try:
+            if start.endswith("Z"):
+                start = start[:-1] + "+00:00"
+            dt = datetime.fromisoformat(start)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone(timedelta(hours=9)))
+            dt = dt.astimezone(timezone(timedelta(hours=9)))
+            date_text = dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
         return build_scheduler_result_card(f"{team_name} 주간회의 일자는 {date_text}입니다.", include_action_response=True)
 
     return {"text": "지원하지 않는 카드 액션입니다."}
