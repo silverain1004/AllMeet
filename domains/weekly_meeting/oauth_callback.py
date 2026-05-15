@@ -15,7 +15,9 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from api.chat.messages import post_message_to_space
 from config.settings import OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI
+from domains.daily_chat import welcome_with_capabilities_text
 from firestore.oauth_tokens import save_token
 from firestore.team_member_oauth_sync import sync_oauth_status
 
@@ -25,9 +27,23 @@ logger = logging.getLogger(__name__)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
     "openid",
     "email",
 ]
+
+
+def encode_state(*, user_email: str, space_name: str = "") -> str:
+    """state 직렬화 — 동의 후 같은 스페이스에 인사 메시지를 push 하기 위함.
+
+    포맷: ``email:<email>|space:<spaces/XXX>`` (공백 없는 ``|`` 구분). 단순 텍스트라 nonce
+    검증은 없음 — 운영에선 server-side session 권장.
+    """
+    parts = [f"email:{user_email}"]
+    s = (space_name or "").strip()
+    if s:
+        parts.append(f"space:{s}")
+    return "|".join(parts)
 
 
 def build_authorization_url(*, user_email_hint: str = "", state: str = "") -> str:
@@ -66,8 +82,8 @@ def handle_oauth_callback(request: Any) -> tuple[str, int, dict[str, str]]:
     if not code:
         return _html_response("인증 코드가 없어요. 다시 시도해 주세요.", 400)
 
-    # state 에서 user_email 추출 (운영은 별도 session storage 권장)
-    user_email = _user_email_from_state(state)
+    # state 에서 user_email + space_name 추출 (운영은 별도 session storage 권장)
+    user_email, space_name = _decode_state(state)
 
     # Token 교환
     token_data = _exchange_code(code)
@@ -99,10 +115,19 @@ def handle_oauth_callback(request: Any) -> tuple[str, int, dict[str, str]]:
     synced = sync_oauth_status(user_email=user_email, status="linked")
     logger.info("OAuth 연결 완료: %s (sync=%d teams)", user_email, synced)
 
+    # 챗 스페이스로 환영/능력 안내 메시지 push — 사용자가 챗 돌아왔을 때 자연스러운 다음 단계.
+    if space_name:
+        pushed = post_message_to_space(
+            space_name=space_name,
+            payload={"text": welcome_with_capabilities_text()},
+        )
+        if not pushed:
+            logger.warning("OAuth 완료 후 챗 push 실패: space=%s", space_name)
+
     return _html_response(
         f"<h2>연결 완료 ✅</h2>"
-        f"<p><b>{user_email}</b> 의 Gmail · 개인 Calendar 가 봇과 연결되었어요.</p>"
-        f"<p>이 창을 닫고 챗으로 돌아가 주세요.</p>",
+        f"<p><b>{user_email}</b> 의 Gmail · 개인 Calendar · 내 Drive 가 봇과 연결되었어요.</p>"
+        f"<p>이 창을 닫고 챗으로 돌아가 주세요. 챗에 안내 메시지가 도착해 있을 거예요.</p>",
         200,
     )
 
@@ -132,11 +157,17 @@ def _exchange_code(code: str) -> dict[str, Any] | None:
         return None
 
 
-def _user_email_from_state(state: str) -> str:
-    """state 파라미터 형식: ``email:user@vntgcorp.com`` (단순). 운영은 server-side session."""
-    if state.startswith("email:"):
-        return state[len("email:") :].strip()
-    return ""
+def _decode_state(state: str) -> tuple[str, str]:
+    """``encode_state`` 의 역변환. (user_email, space_name) 튜플. 누락은 빈 문자열."""
+    email = ""
+    space = ""
+    for part in (state or "").split("|"):
+        token = part.strip()
+        if token.startswith("email:"):
+            email = token[len("email:") :].strip()
+        elif token.startswith("space:"):
+            space = token[len("space:") :].strip()
+    return email, space
 
 
 def _email_from_id_token(id_token: str) -> str:

@@ -25,6 +25,7 @@ TEAM_ROW_FIXED_FIELDS = {
     "confluence_space_key",
     "report_root_page_id",
     "root_pages",
+    "shared_drive_ids",
     "template_page_url",
     "template_page_id",
 }
@@ -34,6 +35,7 @@ TEAM_SETTING_FIELDS = {
     "report_root_page_id",
     "space_key",
     "root_pages",
+    "shared_drive_ids",
     "template_page_url",
     "template_page_id",
 }
@@ -99,6 +101,25 @@ def parse_team_members(raw_value: str) -> list[dict[str, str]]:
     return [{"name": name, "nickname": [], "email": ""} for name in parts]
 
 
+def parse_shared_drive_ids(raw_value: str) -> list[str]:
+    """줄바꿈/쉼표 구분 입력값 → Shared Drive ID 리스트.
+
+    URL 이 들어와도 ``/folders/<id>`` 패턴에서 ID 만 뽑아내고, 그렇지 않으면
+    공백 제거 후 그대로 반환. 빈 값은 무시.
+    """
+    parts = [p.strip() for p in re.split(r"[,\n]", raw_value or "") if p.strip()]
+    if not parts:
+        return []
+    out: list[str] = []
+    for part in parts:
+        m = re.search(r"/folders/([^/?#\s]+)", part)
+        if m:
+            out.append(m.group(1))
+        else:
+            out.append(part)
+    return out
+
+
 def parse_root_page_ids(raw_value: str) -> list[dict[str, Any]]:
     """
     루트 페이지 ID를 줄바꿈/쉼표 기반으로 파싱합니다.
@@ -137,6 +158,7 @@ def _empty_team_row(team_id: str, team_name: str) -> dict[str, Any]:
         "confluence_space_key": "",
         "report_root_page_id": "",
         "root_pages": [],
+        "shared_drive_ids": [],
         "template_page_url": "",
         "template_page_id": "",
     }
@@ -150,6 +172,11 @@ def _normalize_team_row(row: dict[str, Any], *, team_id: str, team_name: str) ->
     base["id"] = team_id
     base["name"] = (str(base.get("name") or "").strip() or team_name or team_id).strip()
     base["root_pages"] = base.get("root_pages") if isinstance(base.get("root_pages"), list) else []
+    base["shared_drive_ids"] = (
+        [str(x).strip() for x in base.get("shared_drive_ids") if str(x).strip()]
+        if isinstance(base.get("shared_drive_ids"), list)
+        else []
+    )
     for key in ("calendar_id", "space_key", "confluence_space_key", "report_root_page_id", "template_page_url", "template_page_id"):
         base[key] = str(base.get(key) or "").strip()
     return base
@@ -469,6 +496,29 @@ def update_team_calendar_id(
         space_id=space_id,
         user_context=user_context,
         updates={"calendar_id": (calendar_id or "").strip()},
+    )
+
+
+def update_team_shared_drive_ids(
+    *,
+    team_id: str,
+    shared_drive_ids: list[str],
+    space_id: str,
+    user_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """팀의 Shared Drive ID 리스트를 갱신합니다 (전체 덮어쓰기)."""
+    team_id = normalize_team_id(team_id)
+    existing = get_team_config(team_id)
+    if not existing:
+        raise ValueError("존재하지 않는 팀입니다.")
+    team_name = str(existing.get("team_name") or team_id)
+    cleaned = [str(x).strip() for x in (shared_drive_ids or []) if str(x).strip()]
+    return upsert_team_config(
+        team_id=team_id,
+        team_name=team_name,
+        space_id=space_id,
+        user_context=user_context,
+        updates={"shared_drive_ids": cleaned},
     )
 
 

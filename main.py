@@ -19,7 +19,12 @@ import functions_framework
 from domains.daily_chat import reply_daily_chat, welcome_with_capabilities_text
 from domains.expert_finder import handle_expert_finder
 from domains.schedule_management import handle_schedule_management
-from domains.weekly_meeting import handle_weekly_meeting, handle_weekly_meeting_action
+from domains.weekly_meeting import (
+    build_added_to_space_reply,
+    handle_settings_request,
+    handle_weekly_meeting,
+    handle_weekly_meeting_action,
+)
 from domains.weekly_report import handle_weekly_report_draft
 
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +42,7 @@ class UserIntent(str, Enum):
     DAILY_CHAT = "daily_chat"
     EXPERT_FINDER = "expert_finder"
     SCHEDULE_MANAGEMENT = "schedule_management"
+    SETTINGS = "settings"
     WEEKLY_MEETING = "weekly_meeting"
     WEEKLY_REPORT_DRAFT = "weekly_report_draft"
 
@@ -45,8 +51,8 @@ def match_user_intent(user_message: str) -> UserIntent:
     """
     사용자 메시지를 보고 어느 도메인으로 보낼지 결정합니다.
 
-    우선순위: 주간 회의/등록 > 일정 > 전문가 > 그 외 일상 대화
-    (덜 흔한 키워드를 먼저 매칭해 오탐을 줄입니다.)
+    우선순위: 주간보고초안 > 설정(데이터 연결) > 주간 회의/등록 > 일정 > 전문가 > 일상.
+    덜 흔한 키워드를 먼저 매칭해 오탐을 줄입니다.
     """
     text = (user_message or "").strip().lower()
     if not text:
@@ -54,6 +60,8 @@ def match_user_intent(user_message: str) -> UserIntent:
 
     if _weekly_report_draft_like(text):
         return UserIntent.WEEKLY_REPORT_DRAFT
+    if _settings_like(text):
+        return UserIntent.SETTINGS
     if _weekly_meeting_like(text):
         return UserIntent.WEEKLY_MEETING
     if _schedule_like(text):
@@ -75,6 +83,23 @@ def _weekly_report_draft_like(text: str) -> bool:
         "a 함수 호출",
     )
     return any(k in text for k in keywords)
+
+
+def _settings_like(text: str) -> bool:
+    """'설정' 단독 또는 '데이터 연결' 류 — OAuth 동의 카드 진입."""
+    stripped = text.strip()
+    if stripped in {"설정", "setting", "settings"}:
+        return True
+    keywords = (
+        "내 데이터 연결",
+        "데이터 연결",
+        "내 데이터연결",
+        "데이터연결",
+        "내 정보 연결",
+        "oauth 연결",
+        "oauth연결",
+    )
+    return any(k in stripped for k in keywords)
 
 
 def _weekly_meeting_like(text: str) -> bool:
@@ -172,6 +197,9 @@ def _dispatch_by_intent(
         case UserIntent.SCHEDULE_MANAGEMENT:
             # 캘린더·일정 관리: 샘플 cardsV2 (domains.schedule_management)
             return handle_schedule_management(user_message)
+        case UserIntent.SETTINGS:
+            # '설정' 키워드 — OAuth 동의 카드 단독 (domains.weekly_meeting)
+            return handle_settings_request(user_message, chat_event=payload)
         case UserIntent.WEEKLY_MEETING:
             # 주간 회의·팀/인원 등록: 샘플 cardsV2 (domains.weekly_meeting)
             return handle_weekly_meeting(user_message, chat_event=payload)
@@ -245,10 +273,10 @@ def hello_http(request):
             {"Content-Type": "application/json; charset=utf-8"},
         )
 
-    # 봇이 스페이스에 추가될 때 — 인사 + 잘하는 업무 (daily_chat.chat)
+    # 봇이 스페이스에 추가될 때 — 환영 + '내 데이터 연결' 안내 카드 (필수 셋업).
     if payload.get("type") == "ADDED_TO_SPACE":
         return (
-            json.dumps({"text": welcome_with_capabilities_text()}, ensure_ascii=False),
+            json.dumps(build_added_to_space_reply(), ensure_ascii=False),
             200,
             {"Content-Type": "application/json; charset=utf-8"},
         )

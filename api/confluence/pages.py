@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from api._auth.confluence_basic import get_confluence_auth
+from api.confluence.users import resolve_account_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +34,26 @@ def list_pages_modified(
     modified_by_email: str,
     time_min: str,
     time_max: str,
+    fallback_display_names: list[str] | None = None,
     limit: int = 50,
 ) -> ListPagesResult:
-    """CQL: ``space=X AND lastmodified>=... AND contributor.email=Y AND type=page``.
+    """CQL: ``space=X AND lastmodified>=... AND contributor.accountid=Y AND type=page``.
+
+    Atlassian Cloud 는 ``contributor.email`` 을 받지 않으므로 이메일을 accountId 로 변환해
+    사용. 변환 실패 시 contributor 절 없이 스페이스+기간만 조회하고 ``fallback_display_names``
+    로 client-side 필터.
 
     Args:
         space_key: Confluence 스페이스 키 (예: ``"PC2"``).
         modified_by_email: 기여자 이메일.
         time_min, time_max: ISO8601 (예: ``"2026-04-30T00:00:00Z"``).
+        fallback_display_names: accountId 해석이 실패했을 때 ``version.by.displayName``
+            매칭에 쓰는 후보 (팀 멤버 이름·닉네임). 비어 있으면 폴백 안 함.
 
     Returns:
         ``ListPagesResult`` — ``error_kind`` 후보:
-        ``"space_key_missing"``, ``"auth_error"``, ``"not_found"``, ``"http_error"``.
+        ``"space_key_missing"``, ``"auth_error"``, ``"not_found"``, ``"http_error"``,
+        ``"account_id_unresolved"``.
     """
     if not space_key:
         return ListPagesResult(ok=False, error_kind="space_key_missing")
@@ -57,13 +66,34 @@ def list_pages_modified(
 
     cql_min = _iso_to_cql_date(time_min)
     cql_max = _iso_to_cql_date(time_max)
-    cql = (
-        f'space = "{space_key}" '
-        f'AND lastmodified >= "{cql_min}" '
-        f'AND lastmodified < "{cql_max}" '
-        f'AND contributor.email = "{modified_by_email}" '
-        f'AND type = "page"'
-    )
+
+    resolved = resolve_account_id(modified_by_email)
+    account_id = (resolved or {}).get("account_id") or ""
+
+    use_fallback = not account_id
+    if use_fallback and not fallback_display_names:
+        logger.warning(
+            "confluence list_pages accountId 미해석 + 폴백 이름 없음 email=%s",
+            modified_by_email,
+        )
+        return ListPagesResult(ok=False, error_kind="account_id_unresolved")
+
+    if account_id:
+        cql = (
+            f'space = "{space_key}" '
+            f'AND lastmodified >= "{cql_min}" '
+            f'AND lastmodified < "{cql_max}" '
+            f'AND contributor.accountid = "{account_id}" '
+            f'AND type = "page"'
+        )
+    else:
+        cql = (
+            f'space = "{space_key}" '
+            f'AND lastmodified >= "{cql_min}" '
+            f'AND lastmodified < "{cql_max}" '
+            f'AND type = "page"'
+        )
+
     params = {
         "cql": cql,
         "limit": str(limit),
@@ -79,23 +109,34 @@ def list_pages_modified(
         with urllib.request.urlopen(req, timeout=20) as resp:
             payload = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
         if e.code == 404:
+            logger.warning("confluence list_pages 404 cql=%s body=%s", cql, body)
             return ListPagesResult(ok=False, error_kind="not_found")
         if e.code in (401, 403):
+            logger.warning("confluence list_pages %s body=%s", e.code, body)
             return ListPagesResult(ok=False, error_kind="auth_error")
-        logger.warning("confluence list_pages HTTP %s", e.code)
+        logger.warning("confluence list_pages HTTP %s cql=%s body=%s", e.code, cql, body)
         return ListPagesResult(ok=False, error_kind="http_error")
     except Exception as e:
-        logger.warning("confluence list_pages 실패: %s", e)
+        logger.warning("confluence list_pages 실패: %s cql=%s", e, cql)
         return ListPagesResult(ok=False, error_kind="http_error")
 
     data = json.loads(payload)
-    pages: list[dict[str, Any]] = []
     base_url = auth["base_url"]
+
+    pages: list[dict[str, Any]] = []
+    needles = _normalize_names(fallback_display_names) if use_fallback else []
     for item in data.get("results") or []:
         if not isinstance(item, dict):
             continue
         version = item.get("version") or {}
+        if use_fallback and not _matches_displayname(version, needles):
+            continue
         webui = ((item.get("_links") or {}).get("webui")) or ""
         pages.append(
             {
@@ -107,6 +148,26 @@ def list_pages_modified(
             }
         )
     return ListPagesResult(ok=True, pages=pages)
+
+
+def _matches_displayname(version: dict[str, Any], needles: list[str]) -> bool:
+    """폴백 매칭 — ``version.by.displayName`` 이 후보 중 하나에 부분일치."""
+    if not needles:
+        return False
+    by = version.get("by") if isinstance(version.get("by"), dict) else {}
+    name = str((by or {}).get("displayName") or "").strip().lower()
+    if not name:
+        return False
+    return any(n in name or name in n for n in needles)
+
+
+def _normalize_names(values: list[str] | None) -> list[str]:
+    out: list[str] = []
+    for v in values or []:
+        s = str(v or "").strip().lower()
+        if s:
+            out.append(s)
+    return out
 
 
 def _iso_to_cql_date(iso: str) -> str:

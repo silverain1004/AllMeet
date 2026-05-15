@@ -18,8 +18,14 @@ from firestore.oauth_tokens import get_token, touch_refreshed, update_status
 
 logger = logging.getLogger(__name__)
 
+# 캐시 키 — (user_email, sorted scopes tuple). scope 별로 access_token 이 달라지므로
+# email 만으로 캐싱하면 다른 scope 호출이 폴루션 되어 403 발생.
 _lock = threading.Lock()
-_creds_cache: dict[str, Credentials] = {}
+_creds_cache: dict[tuple[str, tuple[str, ...]], Credentials] = {}
+
+
+def _cache_key(user_email: str, scopes: list[str]) -> tuple[str, tuple[str, ...]]:
+    return (user_email, tuple(sorted(scopes)))
 
 
 class AuthRequiredError(Exception):
@@ -41,8 +47,9 @@ def get_user_credentials(user_email: str, scopes: list[str]) -> Credentials:
     if not user_email:
         raise AuthRequiredError("", reason="empty_email")
 
+    key = _cache_key(user_email, scopes)
     with _lock:
-        cached = _creds_cache.get(user_email)
+        cached = _creds_cache.get(key)
     if cached is not None and cached.valid:
         return cached
 
@@ -73,12 +80,14 @@ def get_user_credentials(user_email: str, scopes: list[str]) -> Credentials:
         logger.warning("refresh_token 재발급 실패 (%s): %s", user_email, e)
         update_status(user_email, "revoked")
         with _lock:
-            _creds_cache.pop(user_email, None)
+            for k in list(_creds_cache.keys()):
+                if k[0] == user_email:
+                    _creds_cache.pop(k, None)
         raise AuthRequiredError(user_email, reason="refresh_failed") from e
 
     touch_refreshed(user_email)
     with _lock:
-        _creds_cache[user_email] = creds
+        _creds_cache[key] = creds
     return creds
 
 

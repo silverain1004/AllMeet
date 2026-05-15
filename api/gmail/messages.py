@@ -63,9 +63,15 @@ def list_messages(
         with urllib.request.urlopen(req, timeout=20) as resp:
             list_payload = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
         if e.code in (401, 403):
+            logger.warning("gmail list HTTP %s body=%s", e.code, body)
             return ListMessagesResult(ok=False, error_kind="auth_required")
-        logger.warning("gmail list HTTP %s", e.code)
+        logger.warning("gmail list HTTP %s body=%s", e.code, body)
         return ListMessagesResult(ok=False, error_kind="http_error")
     except Exception as e:
         logger.warning("gmail list 실패: %s", e)

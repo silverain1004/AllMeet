@@ -125,15 +125,29 @@ def build_draft_card(
             )
         )
 
-    # Vertex 종합 초안
-    if draft:
-        summary = str(draft.get("summary") or "(초안 미생성)")
+    # 내 Drive (Phase 2 — 본인 My Drive)
+    personal_drv_error = errors.get("personal_drive")
+    personal_drv_items = raw.get("personal_drive") or []
+    if personal_drv_error or personal_drv_items:
         sections.append(
-            {
-                "header": "✏️ 종합 초안",
-                "widgets": [{"textParagraph": {"text": html.escape(summary).replace("\n", "<br>")}}],
-            }
+            _service_section(
+                header="📁 내 드라이브",
+                items=personal_drv_items,
+                error=personal_drv_error,
+                fmt=lambda f: f"{(f.get('name') or '-')} ({(f.get('modified_time') or '-')[:10]})",
+            )
         )
+
+    # Vertex 종합 초안 — 프로젝트 / 운영지원 두 카테고리.
+    if draft:
+        body = _render_draft_body(draft)
+        if body:
+            sections.append(
+                {
+                    "header": "✏️ 종합 초안",
+                    "widgets": [{"textParagraph": {"text": body}}],
+                }
+            )
 
     return {
         "cardsV2": [
@@ -149,6 +163,45 @@ def build_draft_card(
             }
         ]
     }
+
+
+def _render_draft_body(draft: dict[str, Any]) -> str:
+    """draft = {projects: [...], operations: [...]} → cardsV2 textParagraph HTML.
+
+    구조 (task 간 시각 구분을 위해 빈 줄 한 칸씩):
+        <b>프로젝트</b>
+        • task1
+        &nbsp;&nbsp;◦ detail1
+        &nbsp;&nbsp;◦ detail2
+                                ← 빈 줄
+        • task2
+        ...
+        <b>운영지원</b>
+        ...
+    """
+    blocks: list[str] = []
+    for header, key in (("프로젝트", "projects"), ("운영지원", "operations")):
+        items = draft.get(key) or []
+        if not items:
+            continue
+        task_blocks: list[str] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            task = str(it.get("task") or "").strip()
+            if not task:
+                continue
+            task_lines = [f"• {html.escape(task)}"]
+            for d in it.get("details") or []:
+                detail = str(d or "").strip()
+                if not detail:
+                    continue
+                task_lines.append(f"&nbsp;&nbsp;◦ {html.escape(detail)}")
+            task_blocks.append("<br>".join(task_lines))
+        if task_blocks:
+            # task 간은 붙이고 (단일 <br>), 카테고리 ↔ 카테고리 사이만 빈 줄 한 칸 (블록 join 의 <br><br>).
+            blocks.append(f"<b>{header}</b><br>" + "<br>".join(task_blocks))
+    return "<br><br>".join(blocks)
 
 
 def _service_section(

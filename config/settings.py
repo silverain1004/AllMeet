@@ -25,3 +25,10 @@ SHARED_DRIVE_ID = os.environ.get("SHARED_DRIVE_ID") or ""
 OAUTH_CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID") or ""
 OAUTH_CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET") or ""
 OAUTH_REDIRECT_URI = os.environ.get("OAUTH_REDIRECT_URI") or ""
+
+# 봇 SA 이메일 — Drive Shared Drive 자동 멤버 등록 시 reader 로 추가할 대상.
+# Cloud Run 에 attached 된 SA 와 동일해야 함.
+BOT_SA_EMAIL = (
+    os.environ.get("BOT_SA_EMAIL")
+    or "all-meet-test@ai-agent-test-482706.iam.gserviceaccount.com"
+)

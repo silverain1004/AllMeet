@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timedelta
 from typing import Any
@@ -34,7 +35,7 @@ from domains.weekly_report.timewindow import (
     kst_now,
     two_weeks_around_utc_iso,
 )
-from firestore.team_config import find_team_by_email, get_team_from_index
+from firestore.team_config import find_team_by_email, get_team_config, get_team_from_index
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,13 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
     space_key = str(
         team_index.get("space_key") or team_index.get("confluence_space_key") or ""
     ).strip()
+    raw_drive_ids = team_index.get("shared_drive_ids") or []
+    shared_drive_ids = (
+        [str(x).strip() for x in raw_drive_ids if str(x).strip()]
+        if isinstance(raw_drive_ids, list)
+        else []
+    )
+    confluence_fallback_names = _confluence_fallback_names(team_id, user_email)
 
     # 2. 주간회의 일자 (KST 기준 ±30일 검색)
     meeting_date_dt = _find_meeting_date_for_team(calendar_id)
@@ -112,16 +120,21 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
         user_email=user_email,
         calendar_id=calendar_id,
         space_key=space_key,
+        shared_drive_ids=shared_drive_ids,
         time_min=time_min,
         time_max=time_max,
+        confluence_fallback_names=confluence_fallback_names,
     )
 
     # 5. 모든 섹션 빈 결과 + 모든 에러 무 → 활동 없음 안내
     if _has_any_data(raw) is False and _has_any_error(errors) is False:
         return build_no_data_card(user_display_name, team_name, meeting_date_str)
 
-    # 6. Vertex 분석 (실패해도 raw 만으로 카드)
-    draft = _vertex_analyze(user_display_name, meeting_date_str, raw)
+    # 6. Vertex 분석 (실패해도 raw 만으로 카드).
+    # 카드 리스트 표시용 raw 는 그대로, LLM 입력만 주간회의 자체 항목 제거 — 자기참조 요약 방지.
+    draft = _vertex_analyze(
+        user_display_name, user_email, meeting_date_str, _filter_for_draft(raw)
+    )
 
     # 7. 카드 빌드
     return build_draft_card(
@@ -163,17 +176,21 @@ def _collect_all_services(
     space_key: str,
     time_min: str,
     time_max: str,
+    shared_drive_ids: list[str] | None = None,
+    confluence_fallback_names: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """서비스별 호출 — 각각 try/except 격리. 한 곳 실패가 전체 죽이지 않게."""
     raw: dict[str, Any] = {}
     errors: dict[str, str] = {}
 
-    # Calendar (공용)
+    # Calendar (공용) — 본인이 참여한 이벤트만 필터.
     if calendar_id:
         try:
             cal_res = list_events(calendar_id=calendar_id, time_min=time_min, time_max=time_max)
             if cal_res.ok:
-                raw["calendar"] = cal_res.events
+                raw["calendar"] = [
+                    ev for ev in cal_res.events if _is_user_involved(ev, user_email)
+                ]
             else:
                 errors["calendar"] = cal_res.error_kind or "unknown"
         except Exception as e:
@@ -182,18 +199,50 @@ def _collect_all_services(
     else:
         errors["calendar"] = "calendar_id_missing"
 
-    # Drive
-    try:
-        drv_res = list_files_modified(
-            modified_by_email=user_email, time_min=time_min, time_max=time_max
-        )
-        if drv_res.ok:
-            raw["drive"] = drv_res.files
-        else:
-            errors["drive"] = drv_res.error_kind or "unknown"
-    except Exception as e:
-        logger.warning("drive 호출 예외: %s", e)
-        errors["drive"] = "exception"
+    # Drive — 팀이 등록한 Shared Drive 들 각각 조회 후 합산. 비어 있으면 env 폴백(미설정 시 안내).
+    # 쿼리(`'<email>' in writers`)는 권한 기반이라 본인이 멤버인 한 다른 사람이 마지막 수정자인 파일도
+    # 같이 올라옴 — 본인 활동만 추리려고 lastModifyingUser 후처리.
+    drive_ids = [d for d in (shared_drive_ids or []) if d]
+    if drive_ids:
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        per_drive_errors: list[str] = []
+        for d_id in drive_ids:
+            try:
+                drv_res = list_files_modified(
+                    modified_by_email=user_email,
+                    time_min=time_min,
+                    time_max=time_max,
+                    drive_id=d_id,
+                )
+                if drv_res.ok:
+                    for f in _only_my_modifications(drv_res.files, user_email):
+                        fid = str(f.get("id") or "")
+                        if fid and fid in seen_ids:
+                            continue
+                        if fid:
+                            seen_ids.add(fid)
+                        merged.append(f)
+                else:
+                    per_drive_errors.append(f"{d_id}:{drv_res.error_kind or 'unknown'}")
+            except Exception as e:
+                logger.warning("drive 호출 예외 drive_id=%s: %s", d_id, e)
+                per_drive_errors.append(f"{d_id}:exception")
+        raw["drive"] = merged
+        if per_drive_errors and not merged:
+            errors["drive"] = ";".join(per_drive_errors)
+    else:
+        try:
+            drv_res = list_files_modified(
+                modified_by_email=user_email, time_min=time_min, time_max=time_max
+            )
+            if drv_res.ok:
+                raw["drive"] = _only_my_modifications(drv_res.files, user_email)
+            else:
+                errors["drive"] = drv_res.error_kind or "unknown"
+        except Exception as e:
+            logger.warning("drive 호출 예외: %s", e)
+            errors["drive"] = "exception"
 
     # Confluence
     if space_key:
@@ -203,6 +252,7 @@ def _collect_all_services(
                 modified_by_email=user_email,
                 time_min=time_min,
                 time_max=time_max,
+                fallback_display_names=confluence_fallback_names,
             )
             if pg_res.ok:
                 raw["confluence"] = pg_res.pages
@@ -214,13 +264,13 @@ def _collect_all_services(
     else:
         errors["confluence"] = "space_key_missing"
 
-    # Gmail (Phase 2 — OAuth 동의자 한정)
+    # Gmail (Phase 2 — OAuth 동의자 한정). 노이즈 메일은 raw 단계에서 사전 제거 → 카드 리스트도 깔끔.
     try:
         from api.gmail.messages import list_messages
 
         gm_res = list_messages(user_email=user_email, time_min=time_min, time_max=time_max)
         if gm_res.ok:
-            raw["gmail"] = gm_res.messages
+            raw["gmail"] = _filter_gmail_noise(gm_res.messages, user_email)
         else:
             errors["gmail"] = gm_res.error_kind or "unknown"
     except Exception as e:
@@ -244,7 +294,180 @@ def _collect_all_services(
         logger.warning("personal_calendar 호출 예외: %s", e)
         errors["personal_calendar"] = "exception"
 
+    # 내 Drive (Phase 2 — OAuth 동의자 한정, 본인 My Drive)
+    try:
+        pdrv_res = list_files_modified(
+            modified_by_email=user_email,
+            time_min=time_min,
+            time_max=time_max,
+            credentials_source="user_oauth",
+            user_email=user_email,
+        )
+        if pdrv_res.ok:
+            raw["personal_drive"] = _only_my_modifications(pdrv_res.files, user_email)
+        else:
+            errors["personal_drive"] = pdrv_res.error_kind or "unknown"
+    except Exception as e:
+        logger.warning("personal_drive 호출 예외: %s", e)
+        errors["personal_drive"] = "exception"
+
     return raw, errors
+
+
+def _confluence_fallback_names(team_id: str, user_email: str) -> list[str]:
+    """팀 멤버 중 ``user_email`` 매칭 항목의 ``name`` + ``nickname[]`` 후보 리스트.
+
+    Confluence accountId 해석이 실패했을 때 ``version.by.displayName`` 매칭에 사용.
+    """
+    if not team_id or not user_email:
+        return []
+    try:
+        cfg = get_team_config(team_id) or {}
+    except Exception as e:
+        logger.warning("team_config 로드 실패 team_id=%s: %s", team_id, e)
+        return []
+    needle = user_email.strip().lower()
+    out: list[str] = []
+    for m in cfg.get("team_members") or []:
+        if not isinstance(m, dict):
+            continue
+        if str(m.get("email") or "").strip().lower() != needle:
+            continue
+        name = str(m.get("name") or "").strip()
+        if name:
+            out.append(name)
+        for nick in m.get("nickname") or []:
+            s = str(nick or "").strip()
+            if s:
+                out.append(s)
+        break
+    return out
+
+
+def _is_user_involved(event: dict[str, Any], user_email: str) -> bool:
+    """팀 캘린더 이벤트 중 사용자가 실제로 참여한 것만 통과시킴.
+
+    팀 캘린더에는 다른 팀원의 휴가·재택 같은 attendees 없는 단순 일정도 섞여 있어,
+    주간보고초안 본인 회의 이력에서는 빼야 함.
+
+    통과 조건 (둘 중 하나):
+    - attendees 에 본인 이메일이 있고 ``response_status != "declined"``
+    - organizer/creator 가 본인 (본인이 만든 회의)
+    """
+    if not user_email:
+        return True  # 안전한 폴백 — 이메일 없으면 필터링 자체 의미 없음
+    me = user_email.strip().lower()
+    if str(event.get("organizer_email") or "").strip().lower() == me:
+        return True
+    if str(event.get("creator_email") or "").strip().lower() == me:
+        return True
+    for a in event.get("attendees") or []:
+        if str(a.get("email") or "").strip().lower() != me:
+            continue
+        if str(a.get("response_status") or "") == "declined":
+            return False
+        return True
+    return False
+
+
+# Gmail 노이즈 패턴 — 본인 업무 아닌 자동발신/공유/뉴스레터 류. raw 수집 단계에서 제거되어
+# 카드 리스트와 LLM 입력 모두에서 사라짐. 본인 발신 메일은 별도 검사로 항상 통과.
+# 정보 공유·후기·안내·공지·생산계획 류 — 본인이 안 보낸 정보 수신은 본인 업무 아님.
+_INBOUND_SHARE_SUBJECT_RE = re.compile(
+    r"공유|안내|후기|생산계획|\[공지\]|\[전사\s*공지\]|초대장:"
+)
+_NOISE_SUBJECT_RE = re.compile(
+    r"Claude\.ai\s*로그인용\s*보안\s*링크"
+    r"|보안\s*알림"
+    r"|일일\s*다이제스트를?\s*놓치지\s*마세요"
+    r"|^Re:\s*\[Slashpage\]"
+    r"|\[Slashpage\]"
+    r"|^\(광고\)"
+    r"|광고\s*\|"
+)
+_NOISE_SENDER_RE = re.compile(
+    r"no-reply@|noreply@"
+    r"|Anthropic.*via\s*VNTG\s*AI"
+    r"|Claude\s*Team"
+    r"|Mermaid\b"
+    r"|@email\.cl[ai]"
+    r"|no-reply@accounts\.goog"
+    r"|@slashpage\."
+    r"|info@mkt-email\.",
+    re.IGNORECASE,
+)
+
+
+def _filter_gmail_noise(
+    emails: list[dict[str, Any]], user_email: str
+) -> list[dict[str, Any]]:
+    """본인 업무 아닌 노이즈 메일 제거. 카드 리스트·LLM 입력 모두에 영향.
+
+    제거 대상:
+    - 동료가 보낸 공유/후기/인사이트 메일 (제목 패턴 + 발신자 ≠ 본인)
+    - Claude.ai 로그인 보안 링크, Google 보안 알림, 광고, 뉴스레터, Confluence 일일 다이제스트
+    - no-reply / 알려진 뉴스레터 발신자
+
+    본인 발신 메일은 무조건 통과 (예: 본인이 보낸 후기 공유는 본인 행위라 유지).
+    """
+    user = (user_email or "").strip().lower()
+    out: list[dict[str, Any]] = []
+    for m in emails or []:
+        sender = str(m.get("from") or "").lower()
+        # 본인 발신은 항상 통과
+        if user and user in sender:
+            out.append(m)
+            continue
+        subject = str(m.get("subject") or "")
+        if _INBOUND_SHARE_SUBJECT_RE.search(subject):
+            continue
+        if _NOISE_SUBJECT_RE.search(subject):
+            continue
+        if _NOISE_SENDER_RE.search(sender):
+            continue
+        out.append(m)
+    return out
+
+
+def _only_my_modifications(
+    files: list[dict[str, Any]], user_email: str
+) -> list[dict[str, Any]]:
+    """본인이 마지막 수정자인 파일만 반환.
+
+    Drive API 의 ``'<email>' in writers`` 쿼리는 권한 보유자 필터라, Shared Drive 멤버이기만
+    하면 다른 팀원이 수정한 파일도 같이 올라옴. ``lastModifyingUser.emailAddress`` 로 후처리.
+    user_email 빈 값이면 필터 안 함(안전한 폴백).
+    """
+    me = (user_email or "").strip().lower()
+    if not me:
+        return list(files or [])
+    return [
+        f for f in (files or [])
+        if str(f.get("last_modifier_email") or "").strip().lower() == me
+    ]
+
+
+def _filter_for_draft(raw: dict[str, Any]) -> dict[str, Any]:
+    """LLM 입력용 raw 사본 — 주간회의 자체 항목 제거.
+
+    주간회의를 위해 작성하는 초안이라 '주간회의 진행' 같은 자기참조 요약을 막아야 함.
+    카드 리스트(원본 raw)에는 그대로 남기고, 분석 단계에서만 빠짐.
+    """
+    keyword = "주간회의"
+    filtered = dict(raw)
+
+    for cal_key in ("calendar", "personal_calendar"):
+        items = filtered.get(cal_key) or []
+        filtered[cal_key] = [
+            e for e in items if keyword not in str(e.get("summary") or "")
+        ]
+
+    pages = filtered.get("confluence") or []
+    filtered["confluence"] = [
+        p for p in pages if keyword not in str(p.get("title") or "")
+    ]
+
+    return filtered
 
 
 def _has_any_data(raw: dict[str, Any]) -> bool:
@@ -259,18 +482,26 @@ def _has_any_error(errors: dict[str, str]) -> bool:
 
 # 함수 — Vertex Gemini 호출 (실패 시 None — 카드는 raw 만으로 빌드).
 def _vertex_analyze(
-    user_name: str, meeting_date: str, raw: dict[str, Any]
+    user_name: str,
+    user_email: str,
+    meeting_date: str,
+    raw: dict[str, Any],
 ) -> dict[str, Any] | None:
     try:
         model = _get_vertex_model()
         from vertexai.generative_models import GenerationConfig
 
-        prompt = build_draft_prompt(user_name=user_name, meeting_date=meeting_date, raw=raw)
+        prompt = build_draft_prompt(
+            user_name=user_name,
+            user_email=user_email,
+            meeting_date=meeting_date,
+            raw=raw,
+        )
         res = model.generate_content(
             prompt,
             generation_config=GenerationConfig(
                 temperature=0.3,
-                max_output_tokens=2048,
+                max_output_tokens=8192,
                 response_mime_type="application/json",
                 response_schema=RESPONSE_SCHEMA,
             ),

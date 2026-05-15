@@ -17,6 +17,7 @@ from domains.weekly_meeting.cards import (
     build_oauth_link_card,
     build_schedule_menu_card,
     build_schedule_calendar_id_card,
+    build_schedule_drive_ids_card,
     build_schedule_result_card,
     build_scheduler_card,
     build_scheduler_result_card,
@@ -34,6 +35,8 @@ from domains.weekly_meeting.cards import (
     build_team_setting_menu_card,
     build_weekly_meeting_menu_card,
 )
+from api.drive.permissions import check_sa_member, grant_sa_reader
+from config.settings import BOT_SA_EMAIL
 from domains.weekly_meeting.schedule_lookup import lookup_member_vacation, lookup_weekly_meeting
 from firestore.team_config import (
     delete_team,
@@ -42,10 +45,12 @@ from firestore.team_config import (
     normalize_team_id,
     parse_confluence_space_key,
     parse_root_page_ids,
+    parse_shared_drive_ids,
     parse_template_page_id,
     rename_team_in_list,
     update_team_name,
     update_team_calendar_id,
+    update_team_shared_drive_ids,
     upsert_team_config,
 )
 
@@ -177,6 +182,25 @@ def handle_weekly_meeting(user_message: str, chat_event: dict[str, Any] | None =
     return out
 
 
+def handle_settings_request(
+    user_message: str, chat_event: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """'설정' 키워드 진입 — OAuth 연결 카드 단독으로 표시."""
+    from domains.weekly_meeting.cards import build_settings_entry_card
+
+    user_email = str(((chat_event or {}).get("user") or {}).get("email") or "")
+    return build_settings_entry_card(user_email=user_email)
+
+
+def build_added_to_space_reply() -> dict[str, Any]:
+    """봇이 스페이스에 처음 추가됐을 때 — 환영 문구 + 설정 안내 카드."""
+    from domains.weekly_meeting.cards import build_settings_entry_card
+
+    card = build_settings_entry_card(is_welcome=True)
+    card["text"] = "All-Meet 입니다. 먼저 '내 데이터 연결' 을 한 번 설정해 주세요."
+    return card
+
+
 def handle_weekly_meeting_action(
     *,
     invoked_function: str,
@@ -280,6 +304,82 @@ def handle_weekly_meeting_action(
             user_context=user_context,
         )
         return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ {team_name} 팀 Calendar ID가 저장되었습니다: {calendar_id}"}
+
+    if invoked_function == "wm_schedule_open_drive_ids":
+        return build_schedule_drive_ids_card(get_team_list(), include_action_response=True)
+
+    if invoked_function == "wm_schedule_load_drive_ids":
+        team_id = _safe_team_id(form_inputs)
+        existing, _ = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        current = existing.get("shared_drive_ids") or []
+        if not isinstance(current, list):
+            current = []
+        return build_schedule_drive_ids_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            current_drive_ids=[str(x) for x in current if str(x).strip()],
+        )
+
+    if invoked_function == "wm_schedule_save_drive_ids":
+        team_id = _safe_team_id(form_inputs)
+        existing, team_name = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        raw = _safe_form_value(form_inputs, "shared_drive_ids")
+        ids = parse_shared_drive_ids(raw)
+        granter_email = (user_context or {}).get("email") or ""
+
+        if not ids:
+            update_team_shared_drive_ids(
+                team_id=team_id, shared_drive_ids=[], space_id=space_id, user_context=user_context
+            )
+            return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ {team_name} 팀 Shared Drive ID가 비워졌습니다."}
+
+        per_id_lines: list[str] = []
+        accessible: list[str] = []
+        for d_id in ids:
+            check = check_sa_member(d_id)
+            if check["ok"]:
+                accessible.append(d_id)
+                name = check.get("name") or "(이름 없음)"
+                per_id_lines.append(f"✅ {d_id} — 이미 멤버 ({name})")
+                continue
+
+            # SA 미멤버 → granter OAuth 로 자동 부여 시도
+            grant = grant_sa_reader(drive_id=d_id, granter_email=granter_email, sa_email=BOT_SA_EMAIL)
+            if grant["ok"]:
+                accessible.append(d_id)
+                per_id_lines.append(f"✅ {d_id} — 봇 SA 자동 등록 완료")
+                continue
+
+            ek = grant.get("error_kind") or ""
+            if ek == "oauth_required":
+                per_id_lines.append(
+                    f"🔒 {d_id} — 권한 부여 실패: 본인 OAuth 동의 필요. "
+                    f"메뉴의 '내 데이터 연결' 을 먼저 클릭해 권한을 부여한 뒤 다시 저장해 주세요."
+                )
+            elif ek == "forbidden":
+                per_id_lines.append(
+                    f"❌ {d_id} — 본인이 이 드라이브의 Manager 가 아니에요. "
+                    f"수동으로 SA 추가가 필요합니다: {BOT_SA_EMAIL}"
+                )
+            elif ek == "not_found":
+                per_id_lines.append(
+                    f"❌ {d_id} — 드라이브 미존재 또는 본인도 멤버 아님 (ID 확인 필요)"
+                )
+            else:
+                per_id_lines.append(f"❌ {d_id} — 권한 부여 실패: {ek or 'unknown'}")
+
+        update_team_shared_drive_ids(
+            team_id=team_id, shared_drive_ids=accessible, space_id=space_id, user_context=user_context
+        )
+
+        header = f"*{team_name} 팀 Shared Drive 저장 결과* — 접근 가능 {len(accessible)}/{len(ids)}건"
+        body = "\n".join(per_id_lines)
+        return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"{header}\n{body}"}
 
     # 팀 설정
     if invoked_function == "wm_team_open_list":
@@ -674,14 +774,17 @@ def handle_weekly_meeting_action(
         )
         return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": "✅ 컨플루언스 설정이 수정되었습니다."}
 
-    # OAuth 연결 (Phase 2 — Gmail / 개인 Calendar 권한 동의)
+    # OAuth 연결 (Phase 2 — Gmail / 개인 Calendar / 내 Drive 권한 동의)
     if invoked_function == "wm_oauth_link":
-        from domains.weekly_meeting.oauth_callback import build_authorization_url
+        from domains.weekly_meeting.oauth_callback import build_authorization_url, encode_state
 
         user_email = str((chat_event.get("user") or {}).get("email") or "")
         if not user_email:
             return {"text": "사용자 이메일을 확인하지 못했어요."}
-        url = build_authorization_url(user_email_hint=user_email, state=f"email:{user_email}")
+        url = build_authorization_url(
+            user_email_hint=user_email,
+            state=encode_state(user_email=user_email, space_name=_space_id(chat_event)),
+        )
         return build_oauth_link_card(user_email=user_email, auth_url=url, include_action_response=True)
 
     # 스케줄러

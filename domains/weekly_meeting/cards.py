@@ -109,12 +109,55 @@ def build_weekly_meeting_menu_card(*, include_action_response: bool = False) -> 
                     {"text": "3. 팀원 설정", "onClick": {"action": {"function": "wm_open_member_menu"}}},
                     {"text": "4. 컨플루언스 설정", "onClick": {"action": {"function": "wm_open_conf_menu"}}},
                     {"text": "5. 스케줄러", "onClick": {"action": {"function": "wm_open_scheduler"}}},
-                    {"text": "6. 내 데이터 연결 (Gmail/개인 Calendar)", "onClick": {"action": {"function": "wm_oauth_link"}}},
                 ]
             }
         },
     ]
     return _wrap_card("wm_main_menu", {"title": "AllMeet", "subtitle": "주간회의/주간보고"}, widgets, include_action_response=include_action_response)
+
+
+def build_settings_entry_card(
+    *,
+    user_email: str = "",
+    is_welcome: bool = False,
+    include_action_response: bool = False,
+) -> dict[str, Any]:
+    """'설정' 키워드 진입 카드 + ADDED_TO_SPACE 환영용.
+
+    Gmail / 개인 Calendar / 내 Drive 사용을 위한 OAuth 동의를 안내. ``is_welcome=True`` 면
+    봇이 처음 스페이스에 추가됐을 때의 환영 문구도 함께.
+    """
+    if is_welcome:
+        intro = (
+            "<b>All-Meet 가 추가됐어요 👋</b><br>"
+            "Gmail · 개인 Calendar · 내 Drive 활동을 주간보고초안에 함께 반영하려면 "
+            "<b>내 데이터 연결</b> 한 번이 필요해요. (한 번만 동의하면 됩니다)<br><br>"
+            "<i>아래 버튼을 눌러 동의 화면을 여세요. 이후엔 '설정' 이라고 보내면 다시 이 카드가 나옵니다.</i>"
+        )
+    else:
+        intro = (
+            "<b>설정 — 내 데이터 연결</b><br>"
+            "Gmail · 개인 Calendar · 내 Drive 활동을 주간보고초안에서 사용하려면 동의가 필요해요."
+        )
+    widgets = [
+        {"textParagraph": {"text": intro}},
+        {
+            "buttonList": {
+                "buttons": [
+                    {
+                        "text": "🔗 내 데이터 연결 (Gmail/Calendar/Drive)",
+                        "onClick": {"action": {"function": "wm_oauth_link"}},
+                    },
+                ]
+            }
+        },
+    ]
+    return _wrap_card(
+        "wm_settings_entry",
+        {"title": "AllMeet", "subtitle": "설정"},
+        widgets,
+        include_action_response=include_action_response,
+    )
 
 
 def build_oauth_link_card(
@@ -123,15 +166,19 @@ def build_oauth_link_card(
     auth_url: str,
     include_action_response: bool = False,
 ) -> dict[str, Any]:
-    """OAuth 동의 안내 카드 — 사용자가 외부 링크를 눌러 Google 동의 화면으로."""
+    """OAuth 동의 안내 카드 — 사용자가 외부 링크를 눌러 Google 동의 화면으로.
+
+    독립 카드 (주간회의 메뉴와 무관) — 동의 완료되면 OAuth callback 이 자동으로
+    같은 스페이스에 환영 메시지를 push.
+    """
     safe_email = html.escape(user_email)
     widgets = [
         {
             "textParagraph": {
                 "text": (
-                    f"<b>{safe_email}</b> 의 Gmail · 개인 Calendar 를 봇과 연결합니다.<br>"
+                    f"<b>{safe_email}</b> 의 Gmail · 개인 Calendar · 내 Drive 를 봇과 연결합니다.<br>"
                     "아래 버튼을 누르면 Google 동의 화면이 열려요. "
-                    "동의 후 자동으로 다시 안내됩니다."
+                    "동의를 완료하면 챗으로 자동 안내가 옵니다."
                 )
             }
         },
@@ -145,7 +192,6 @@ def build_oauth_link_card(
                 ]
             }
         },
-        _menu_back_button(),
     ]
     return _wrap_card(
         "wm_oauth_link",
@@ -204,6 +250,53 @@ def build_schedule_calendar_id_card(teams: list[dict[str, str]], *, include_acti
     return _wrap_card("wm_schedule_calendar_id", {"title": "AllMeet", "subtitle": "일정 조회 > 캘린더 ID 설정"}, widgets, include_action_response=include_action_response)
 
 
+def build_schedule_drive_ids_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    current_drive_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """팀별 Shared Drive ID 입력 카드 (여러 개 — 줄바꿈 또는 쉼표 구분)."""
+    items = _team_items(teams)
+    if selected_team_id:
+        for it in items:
+            if it.get("value") == selected_team_id:
+                it["selected"] = True
+    current_text = ", ".join(current_drive_ids or [])
+    widgets = [
+        {
+            "textParagraph": {
+                "text": (
+                    "<b>팀별 Shared Drive ID 설정</b><br>"
+                    "Google Drive의 Shared Drive ID 를 입력해 주세요. "
+                    "여러 개일 경우 <b>쉼표(,)</b> 로 구분 (줄바꿈도 허용).<br>"
+                    "URL(<code>/folders/&lt;id&gt;</code>) 을 그대로 붙여 넣어도 ID 만 추출됩니다.<br>"
+                    "<i>※ 봇 SA(<code>all-meet-test@ai-agent-test-482706.iam.gserviceaccount.com</code>) 가 해당 드라이브 멤버여야 함.</i>"
+                )
+            }
+        },
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": items}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_schedule_load_drive_ids"}}}]}},
+        {
+            "textInput": {
+                "name": "shared_drive_ids",
+                "label": "Shared Drive ID (쉼표로 구분)",
+                "type": "MULTIPLE_LINE",
+                "value": current_text,
+            }
+        },
+        {"buttonList": {"buttons": [{"text": "저장", "onClick": {"action": {"function": "wm_schedule_save_drive_ids"}}}]}},
+        {"buttonList": {"buttons": [{"text": "팀 설정으로 돌아가기", "onClick": {"action": {"function": "wm_open_team_menu"}}}]}},
+    ]
+    return _wrap_card(
+        "wm_schedule_drive_ids",
+        {"title": "AllMeet", "subtitle": "팀 설정 > Shared Drive ID 설정"},
+        widgets,
+        include_action_response=include_action_response,
+    )
+
+
 def build_team_setting_menu_card(*, include_action_response: bool = False) -> dict[str, Any]:
     widgets = [
         {"textParagraph": {"text": "<b>팀 설정</b>"}},
@@ -214,6 +307,13 @@ def build_team_setting_menu_card(*, include_action_response: bool = False) -> di
                     {"text": "추가", "onClick": {"action": {"function": "wm_team_open_add"}}},
                     {"text": "수정", "onClick": {"action": {"function": "wm_team_open_edit"}}},
                     {"text": "삭제", "onClick": {"action": {"function": "wm_team_open_delete"}}},
+                ]
+            }
+        },
+        {
+            "buttonList": {
+                "buttons": [
+                    {"text": "Shared Drive ID 설정", "onClick": {"action": {"function": "wm_schedule_open_drive_ids"}}},
                 ]
             }
         },

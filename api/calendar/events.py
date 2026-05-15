@@ -85,11 +85,18 @@ def list_events(
         with urllib.request.urlopen(req, timeout=20) as resp:
             payload = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
         if e.code == 404:
+            logger.warning("calendar list_events 404 calendar_id=%s body=%s", calendar_id, body)
             return ListEventsResult(ok=False, error_kind="not_found")
         if e.code in (401, 403):
+            logger.warning("calendar list_events %s calendar_id=%s source=%s body=%s", e.code, calendar_id, credentials_source, body)
             return ListEventsResult(ok=False, error_kind="auth_error")
-        logger.warning("calendar list_events HTTP %s", e.code)
+        logger.warning("calendar list_events HTTP %s body=%s", e.code, body)
         return ListEventsResult(ok=False, error_kind="http_error")
     except Exception as e:
         logger.warning("calendar list_events 실패: %s", e)
@@ -102,6 +109,20 @@ def list_events(
             continue
         start = item.get("start") or {}
         end = item.get("end") or {}
+        attendees: list[dict[str, Any]] = []
+        for a in item.get("attendees") or []:
+            if not isinstance(a, dict):
+                continue
+            attendees.append(
+                {
+                    "email": str(a.get("email") or ""),
+                    "response_status": str(a.get("responseStatus") or ""),
+                    "self": bool(a.get("self") or False),
+                    "organizer": bool(a.get("organizer") or False),
+                }
+            )
+        organizer_email = str((item.get("organizer") or {}).get("email") or "")
+        creator_email = str((item.get("creator") or {}).get("email") or "")
         events.append(
             {
                 "id": str(item.get("id") or ""),
@@ -109,6 +130,9 @@ def list_events(
                 "description": str(item.get("description") or ""),
                 "start": str(start.get("dateTime") or start.get("date") or ""),
                 "end": str(end.get("dateTime") or end.get("date") or ""),
+                "attendees": attendees,
+                "organizer_email": organizer_email,
+                "creator_email": creator_email,
             }
         )
     return ListEventsResult(ok=True, events=events)
