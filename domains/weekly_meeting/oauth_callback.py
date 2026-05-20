@@ -24,10 +24,12 @@ from firestore.team_member_oauth_sync import sync_oauth_status
 logger = logging.getLogger(__name__)
 
 # 이 스코프들은 OAuth consent screen 등록 + Client ID 발급 시 함께 화이트리스트.
+# drive (full) 는 Shared Drive 에 봇 SA 를 reader 로 등록(permissions.create) 하기 위해 필요.
+# readonly 로는 권한 부여 호출이 invalid_scope 로 거부됨.
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",
     "openid",
     "email",
 ]

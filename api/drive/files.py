@@ -53,8 +53,15 @@ def list_files_modified(
         ``"auth_error"``, ``"auth_required"``.
     """
     is_user_oauth = credentials_source == "user_oauth"
+    # lastModifyingUser.me 까지 받아야 외부 SA 호출에서 emailAddress 가 비는 케이스를
+    # 본인 여부로 식별 가능. Workspace 의 외부→내부 이메일 노출 정책 회피용.
+    _FIELDS = (
+        "files(id,name,mimeType,modifiedTime,webViewLink,"
+        "owners(emailAddress,displayName),"
+        "lastModifyingUser(emailAddress,displayName,me))"
+    )
 
-    if is_user_oauth:
+    if is_user_oauth and not drive_id:
         # My Drive — corpora=user, 본인 토큰이라 ``'me' in writers``.
         q_parts = [
             f"modifiedTime > '{time_min}'",
@@ -67,11 +74,27 @@ def list_files_modified(
             "corpora": "user",
             "includeItemsFromAllDrives": "false",
             "supportsAllDrives": "false",
-            "fields": (
-                "files(id,name,mimeType,modifiedTime,webViewLink,"
-                "owners(emailAddress,displayName),"
-                "lastModifyingUser(emailAddress,displayName))"
-            ),
+            "fields": _FIELDS,
+            "pageSize": str(page_size),
+            "orderBy": "modifiedTime desc",
+        }
+    elif is_user_oauth:
+        # Shared Drive 를 사용자 토큰으로 조회 — 본인 emailAddress 가 안 보이는 경우에도
+        # ``lastModifyingUser.me`` 로 식별 가능.
+        drive_id_eff = (drive_id or "").strip()
+        q_parts = [
+            f"modifiedTime > '{time_min}'",
+            f"modifiedTime < '{time_max}'",
+            "'me' in writers",
+            "trashed = false",
+        ]
+        params = {
+            "q": " and ".join(q_parts),
+            "corpora": "drive",
+            "driveId": drive_id_eff,
+            "includeItemsFromAllDrives": "true",
+            "supportsAllDrives": "true",
+            "fields": _FIELDS,
             "pageSize": str(page_size),
             "orderBy": "modifiedTime desc",
         }
@@ -91,11 +114,7 @@ def list_files_modified(
             "driveId": drive_id_eff,
             "includeItemsFromAllDrives": "true",
             "supportsAllDrives": "true",
-            "fields": (
-                "files(id,name,mimeType,modifiedTime,webViewLink,"
-                "owners(emailAddress,displayName),"
-                "lastModifyingUser(emailAddress,displayName))"
-            ),
+            "fields": _FIELDS,
             "pageSize": str(page_size),
             "orderBy": "modifiedTime desc",
         }
@@ -137,8 +156,16 @@ def list_files_modified(
         return ListFilesResult(ok=False, error_kind="auth_error")
 
     data = json.loads(payload)
+    raw_files = data.get("files") or []
+    logger.info(
+        "drive list_files source=%s drive_id=%s q=%s raw_count=%d",
+        credentials_source,
+        params.get("driveId") or "(my_drive)",
+        params.get("q") or "",
+        len(raw_files),
+    )
     files: list[dict[str, Any]] = []
-    for item in data.get("files") or []:
+    for item in raw_files:
         if not isinstance(item, dict):
             continue
         last_user = item.get("lastModifyingUser") or {}
@@ -151,6 +178,7 @@ def list_files_modified(
                 "web_view_link": str(item.get("webViewLink") or ""),
                 "last_modifier_email": str(last_user.get("emailAddress") or ""),
                 "last_modifier_name": str(last_user.get("displayName") or ""),
+                "last_modifier_is_me": bool(last_user.get("me") or False),
             }
         )
     return ListFilesResult(ok=True, files=files)

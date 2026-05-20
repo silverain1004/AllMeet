@@ -114,6 +114,15 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
 
     # 3. 한 주 범위 — KST 회의주 + 전주 → UTC RFC3339
     time_min, time_max = two_weeks_around_utc_iso(meeting_date_dt)
+    logger.info(
+        "weekly_report _collect_and_draft team_id=%s user_email=%s meeting_date=%s time_min=%s time_max=%s drive_ids=%s",
+        team_id,
+        user_email,
+        meeting_date_str,
+        time_min,
+        time_max,
+        shared_drive_ids,
+    )
 
     # 4. 서비스별 raw 수집 (try/except 격리)
     raw, errors = _collect_all_services(
@@ -209,14 +218,30 @@ def _collect_all_services(
         per_drive_errors: list[str] = []
         for d_id in drive_ids:
             try:
+                # 사용자 OAuth 로 Shared Drive 조회 — 외부 SA 호출 시 lastModifyingUser.emailAddress
+                # 가 비어 본인 매칭이 실패하던 문제 회피. 미동의자는 auth_required 로 폴백.
                 drv_res = list_files_modified(
                     modified_by_email=user_email,
                     time_min=time_min,
                     time_max=time_max,
                     drive_id=d_id,
+                    credentials_source="user_oauth",
+                    user_email=user_email,
                 )
                 if drv_res.ok:
-                    for f in _only_my_modifications(drv_res.files, user_email):
+                    filtered = _only_my_modifications(drv_res.files, user_email)
+                    sample = [
+                        (f.get("name") or "")[:30] + ":" + (f.get("last_modifier_email") or "")
+                        for f in (drv_res.files or [])[:5]
+                    ]
+                    logger.info(
+                        "weekly_report drive drive_id=%s raw=%d filtered_by_me=%d sample=%s",
+                        d_id,
+                        len(drv_res.files),
+                        len(filtered),
+                        sample,
+                    )
+                    for f in filtered:
                         fid = str(f.get("id") or "")
                         if fid and fid in seen_ids:
                             continue
@@ -437,6 +462,9 @@ def _only_my_modifications(
     Drive API 의 ``'<email>' in writers`` 쿼리는 권한 보유자 필터라, Shared Drive 멤버이기만
     하면 다른 팀원이 수정한 파일도 같이 올라옴. ``lastModifyingUser.emailAddress`` 로 후처리.
     user_email 빈 값이면 필터 안 함(안전한 폴백).
+
+    Workspace 의 외부→내부 이메일 노출 정책으로 SA 호출 시 emailAddress 가 비어 오기도 함.
+    그 경우를 위해 ``last_modifier_is_me`` (lastModifyingUser.me) 도 본인 신호로 인정.
     """
     me = (user_email or "").strip().lower()
     if not me:
@@ -444,6 +472,7 @@ def _only_my_modifications(
     return [
         f for f in (files or [])
         if str(f.get("last_modifier_email") or "").strip().lower() == me
+        or bool(f.get("last_modifier_is_me"))
     ]
 
 
