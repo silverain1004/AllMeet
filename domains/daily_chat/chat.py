@@ -134,10 +134,11 @@ def _answer_with_google_search(user_message: str, ctx_block: str = "") -> str:
 
 # 함수 — 봇 입장·빈 메시지용 인사 및 잘하는 업무 안내 문구.
 def welcome_with_capabilities_text() -> str:
-    """봇 인사와 잘하는 업무 소개 문구."""
+    """봇 인사와 잘하는 업무 소개 문구 (비카드·레거시 호출용)."""
     return (
         "All-Meet 입니다.\n\n"
         "메시지를 보내 주시면 맞춰 도와드릴게요.\n\n"
+        "챗에서는 홈 메뉴 카드(버튼)로 기능을 선택할 수 있습니다.\n\n"
         + WHAT_I_CAN_DO_TEXT
     )
 
@@ -194,7 +195,7 @@ def reply_daily_chat(
     user_message: str,
     *,
     chat_event: dict[str, Any] | None = None,
-) -> str:
+) -> str | dict[str, Any]:
     """일상 대화 한 턴 응답. chat_event는 main POST JSON; MESSAGE+space면 Firestore 연동."""
     # 1. 입력 정리
     msg = (user_message or "").strip()
@@ -225,7 +226,9 @@ def reply_daily_chat(
 
     # 4. 분기: 기능 안내 / 웹 검색 / Vertex Gemini 일상 대화
     if _user_asks_capabilities(msg, ctx_block):
-        out = WHAT_I_CAN_DO_TEXT
+        from domains.daily_chat.home_menu import build_home_menu_card
+
+        return build_home_menu_card(chat_event=chat_event)
     elif _needs_web_search(msg, ctx_block):
         out = _answer_with_google_search(msg, ctx_block)
     else:

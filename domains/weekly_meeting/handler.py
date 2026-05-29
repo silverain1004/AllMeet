@@ -185,20 +185,18 @@ def handle_weekly_meeting(user_message: str, chat_event: dict[str, Any] | None =
 def handle_settings_request(
     user_message: str, chat_event: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """'설정' 키워드 진입 — OAuth 연결 카드 단독으로 표시."""
-    from domains.weekly_meeting.cards import build_settings_entry_card
+    """'설정' 키워드 진입 — 설정 허브 카드."""
+    from domains.daily_chat.home_menu import build_settings_hub_card
 
-    user_email = str(((chat_event or {}).get("user") or {}).get("email") or "")
-    return build_settings_entry_card(user_email=user_email)
+    _ = user_message
+    return build_settings_hub_card()
 
 
 def build_added_to_space_reply() -> dict[str, Any]:
-    """봇이 스페이스에 처음 추가됐을 때 — 환영 문구 + 설정 안내 카드."""
-    from domains.weekly_meeting.cards import build_settings_entry_card
+    """봇이 스페이스에 처음 추가됐을 때 — 홈 메뉴 카드 (하위 호환)."""
+    from domains.daily_chat.home_menu import build_home_menu_card
 
-    card = build_settings_entry_card(is_welcome=True)
-    card["text"] = "All-Meet 입니다. 먼저 '내 데이터 연결' 을 한 번 설정해 주세요."
-    return card
+    return build_home_menu_card()
 
 
 def handle_weekly_meeting_action(

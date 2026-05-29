@@ -1,8 +1,11 @@
-"""캘린더·일정 관리 (추후 구현).
+"""캘린더·회의실·일정 예약 도메인."""
 
-캘린더 예약·일정 관리 기능을 이 패키지에 구현합니다. (UserIntent.SCHEDULE_MANAGEMENT)
-"""
+from domains.schedule_management.handler import (
+    handle_schedule_management,
+    handle_schedule_management_action,
+)
 
-from domains.schedule_management.handler import handle_schedule_management
-
-__all__ = ["handle_schedule_management"]
+__all__ = [
+    "handle_schedule_management",
+    "handle_schedule_management_action",
+]
