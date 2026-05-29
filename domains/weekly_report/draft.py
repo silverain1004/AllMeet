@@ -192,13 +192,14 @@ def _collect_all_services(
     raw: dict[str, Any] = {}
     errors: dict[str, str] = {}
 
-    # Calendar (공용) — 본인이 참여한 이벤트만 필터.
+    # Calendar (공용) — 본인이 참여한 이벤트만 필터, 노이즈(단순 상태표시·자기참조·전사 공지) 추가 제외.
     if calendar_id:
         try:
             cal_res = list_events(calendar_id=calendar_id, time_min=time_min, time_max=time_max)
             if cal_res.ok:
                 raw["calendar"] = [
-                    ev for ev in cal_res.events if _is_user_involved(ev, user_email)
+                    ev for ev in cal_res.events
+                    if _is_user_involved(ev, user_email) and not _is_calendar_noise(ev, user_email)
                 ]
             else:
                 errors["calendar"] = cal_res.error_kind or "unknown"
@@ -280,7 +281,11 @@ def _collect_all_services(
                 fallback_display_names=confluence_fallback_names,
             )
             if pg_res.ok:
-                raw["confluence"] = pg_res.pages
+                # 주간회의 회의록 제거 — 본 초안을 위한 회의라 자기참조.
+                raw["confluence"] = [
+                    p for p in pg_res.pages
+                    if not _CONFLUENCE_NOISE_TITLE_RE.search(str(p.get("title") or ""))
+                ]
             else:
                 errors["confluence"] = pg_res.error_kind or "unknown"
         except Exception as e:
@@ -302,7 +307,7 @@ def _collect_all_services(
         logger.warning("gmail 호출 예외: %s", e)
         errors["gmail"] = "exception"
 
-    # 개인 Calendar (Phase 2 — OAuth 동의자 한정, 본인 primary)
+    # 개인 Calendar (Phase 2 — OAuth 동의자 한정, 본인 primary). 단순 상태표시·자기참조·전사 공지 제거.
     try:
         pcal_res = list_events(
             calendar_id="primary",
@@ -312,7 +317,9 @@ def _collect_all_services(
             user_email=user_email,
         )
         if pcal_res.ok:
-            raw["personal_calendar"] = pcal_res.events
+            raw["personal_calendar"] = [
+                ev for ev in pcal_res.events if not _is_calendar_noise(ev, user_email)
+            ]
         else:
             errors["personal_calendar"] = pcal_res.error_kind or "unknown"
     except Exception as e:
@@ -395,6 +402,52 @@ def _is_user_involved(event: dict[str, Any], user_email: str) -> bool:
     return False
 
 
+# 단순 상태 표시·자기참조 회의 — 주간보고초안 입력으로 부적합.
+# 정규식은 strip 후 대상이므로 ^...$ 가 안전.
+_CAL_NOISE_TITLE_RE = re.compile(
+    r"^사무실$"
+    r"|^출근$"
+    r"|^퇴근$"
+    r"|^재택$"
+    r"|^반차$"
+    r"|^오전\s*반차$"
+    r"|^오후\s*반차$"
+    r"|^연차$"
+    r"|^오프$"
+    r"|^휴가$"
+    r"|^OOO$"
+    r"|주간\s*회의"  # 주간보고초안 컨텍스트 — 본 초안을 위한 회의라 자기참조
+)
+
+# 대규모 공지/설명회의 임계 인원 — 이상이고 본인 organizer 가 아니면 청자 입장으로 간주.
+_CAL_BROADCAST_ATTENDEE_THRESHOLD = 50
+
+# Confluence 페이지 노이즈 — 주간보고초안 컨텍스트에서 자기참조 회의록(주간회의) 제거.
+_CONFLUENCE_NOISE_TITLE_RE = re.compile(r"주간\s*회의")
+
+
+def _is_calendar_noise(event: dict[str, Any], user_email: str) -> bool:
+    """주간보고초안 입력으로 부적합한 이벤트.
+
+    - 단순 상태 표시 (사무실/재택/반차 등) — 업무 산출물 아님.
+    - 주간회의 자체 — 본 초안을 위한 회의라 자기참조.
+    - 대규모 공지/설명회 (참석자 ``>= _CAL_BROADCAST_ATTENDEE_THRESHOLD``) 에 본인이
+      organizer 가 아닐 때 — 본인은 청자 입장.
+    """
+    title = str(event.get("summary") or "").strip()
+    if title and _CAL_NOISE_TITLE_RE.search(title):
+        return True
+
+    attendees = event.get("attendees") or []
+    if len(attendees) >= _CAL_BROADCAST_ATTENDEE_THRESHOLD:
+        me = (user_email or "").strip().lower()
+        organizer = str(event.get("organizer_email") or "").strip().lower()
+        if not me or organizer != me:
+            return True
+
+    return False
+
+
 # Gmail 노이즈 패턴 — 본인 업무 아닌 자동발신/공유/뉴스레터 류. raw 수집 단계에서 제거되어
 # 카드 리스트와 LLM 입력 모두에서 사라짐. 본인 발신 메일은 별도 검사로 항상 통과.
 # 정보 공유·후기·안내·공지·생산계획 류 — 본인이 안 보낸 정보 수신은 본인 업무 아님.
@@ -409,6 +462,25 @@ _NOISE_SUBJECT_RE = re.compile(
     r"|\[Slashpage\]"
     r"|^\(광고\)"
     r"|광고\s*\|"
+    # 사내 캠페인·복지·복리후생 — 본인 업무 아님 (수혜자/대상자).
+    r"|베이비\s*패키지"
+    r"|칭찬\s*챌린지"
+    r"|힐링\s*명상"
+    r"|체어\s*요가"
+    r"|복리\s*후생"
+    r"|\+\s*\d+\s*M\s*적립"
+    r"|채널\s*개설"
+    r"|지원\s*정책"
+    # 외부 SaaS 마케팅·뉴스레터 (영문 패턴).
+    r"|^Composer\b.*\bis now available"
+    r"|\bnew\s+features\s+in\b"
+    r"|\bnow\s+available\b"
+    r"|^Complete\s+your\s+sign[- ]?up"
+    r"|customer\s+evidence"
+    # 전사 공지·수요조사 — 본인이 주관 아니면 청자 입장 (대형 broadcast 는 Layer 2 가 보조).
+    r"|성과관리제도.*설명회"
+    r"|수요\s*조사",
+    re.IGNORECASE,
 )
 _NOISE_SENDER_RE = re.compile(
     r"no-reply@|noreply@"
@@ -418,7 +490,18 @@ _NOISE_SENDER_RE = re.compile(
     r"|@email\.cl[ai]"
     r"|no-reply@accounts\.goog"
     r"|@slashpage\."
-    r"|info@mkt-email\.",
+    r"|info@mkt-email\."
+    # 외부 SaaS 마케팅·트랜잭션 메일 발신 도메인.
+    r"|@mail\.cursor\."
+    r"|@cursor\.com"
+    r"|@e\.atlassian\.co"
+    r"|@atlassian\.com"
+    r"|@dify\.ai"
+    r"|@light\.tickitack"
+    r"|@orblit\."
+    r"|hello@dify"
+    r"|team@mail\.cursor"
+    r"|info@e\.atlassian",
     re.IGNORECASE,
 )
 

@@ -106,6 +106,43 @@ def resolve_account_id(user_email: str) -> dict[str, str] | None:
     return {"account_id": account_id, "display_name": display_name}
 
 
+def resolve_email_by_account_id(account_id: str) -> str | None:
+    """accountId → email 역해석.
+
+    expert_finder 용. Confluence 응답에는 ``version.by.accountId`` 만 들어오는데,
+    OAuth 동의자 풀과 합집합하려면 email 이 필요. 이미 ``resolve_account_id`` 호출로
+    Firestore ``confluence_users/{email}`` 에 ``account_id`` 필드 캐시된 사람은
+    inverted lookup 한 방으로 해결.
+
+    캐시에 없는 사람은 None 반환 — 호출 측에서 displayName 폴백 (team_members 매칭) 으로 우회.
+    Atlassian user-by-accountId API 도 emailAddress 가 Workspace privacy 정책으로
+    가려져 빈 값 오는 경우가 많아 ROI 낮음.
+
+    Returns:
+        str — 매칭된 email.
+        None — 캐시에 없음 (호출 측 폴백 필요).
+    """
+    if not account_id:
+        return None
+    from firestore.writes import get_client
+
+    db = get_client()
+    try:
+        docs = (
+            db.collection("confluence_users")
+            .where("account_id", "==", account_id)
+            .limit(1)
+            .stream()
+        )
+        for snap in docs:
+            email = (snap.id or "").strip()
+            if email:
+                return email
+    except Exception as e:
+        logger.warning("resolve_email_by_account_id 캐시 lookup 실패: %s", e)
+    return None
+
+
 def _safe_json_list(payload: str) -> list[Any]:
     try:
         data = json.loads(payload or "[]")

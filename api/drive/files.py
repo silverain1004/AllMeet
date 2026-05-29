@@ -18,7 +18,9 @@ from config.settings import SHARED_DRIVE_ID
 
 logger = logging.getLogger(__name__)
 
-_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+# user OAuth consent 는 `drive` (full) 로 받음 (oauth_callback.SCOPES) — refresh 시 scope 문자열을
+# 그대로 비교하므로 readonly 로 요청하면 invalid_scope 로 거부됨. 같은 full scope 로 요청해 일치시킴.
+_SCOPE = "https://www.googleapis.com/auth/drive"
 
 
 @dataclass
@@ -169,6 +171,8 @@ def list_files_modified(
         if not isinstance(item, dict):
             continue
         last_user = item.get("lastModifyingUser") or {}
+        owners = item.get("owners") or []
+        first_owner = owners[0] if owners and isinstance(owners[0], dict) else {}
         files.append(
             {
                 "id": str(item.get("id") or ""),
@@ -176,9 +180,144 @@ def list_files_modified(
                 "mime_type": str(item.get("mimeType") or ""),
                 "modified_time": str(item.get("modifiedTime") or ""),
                 "web_view_link": str(item.get("webViewLink") or ""),
+                "owner_email": str(first_owner.get("emailAddress") or ""),
+                "owner_name": str(first_owner.get("displayName") or ""),
                 "last_modifier_email": str(last_user.get("emailAddress") or ""),
                 "last_modifier_name": str(last_user.get("displayName") or ""),
                 "last_modifier_is_me": bool(last_user.get("me") or False),
             }
         )
     return ListFilesResult(ok=True, files=files)
+
+
+def list_files_by_query(
+    *,
+    query: str,
+    drive_id: str | None = None,
+    credentials_source: str = "service_account",
+    user_email: str = "",
+    page_size: int = 50,
+) -> ListFilesResult:
+    """본문·제목 키워드 검색 (Drive ``fullText contains``).
+
+    Args:
+        query: 검색 키워드 (예: ``"벡터DB"``). 양쪽 작은따옴표·백슬래시는 자동 escape.
+        drive_id: Shared Drive ID. ``credentials_source="user_oauth"`` 면 무시(My Drive).
+        credentials_source: ``"service_account"`` (Shared Drive) | ``"user_oauth"`` (My Drive).
+        user_email: ``user_oauth`` 분기에서 토큰 발급 받을 사용자 이메일.
+
+    Returns:
+        ``ListFilesResult`` — 응답 dict 항목 (``list_files_modified`` 와 동일):
+        ``id, name, mime_type, modified_time, web_view_link,
+        owner_email, owner_name, last_modifier_email, last_modifier_name, last_modifier_is_me``.
+    """
+    if not (query or "").strip():
+        return ListFilesResult(ok=False, error_kind="empty_query")
+
+    is_user_oauth = credentials_source == "user_oauth"
+    _FIELDS = (
+        "files(id,name,mimeType,modifiedTime,webViewLink,"
+        "owners(emailAddress,displayName),"
+        "lastModifyingUser(emailAddress,displayName,me))"
+    )
+
+    safe_q = _escape_drive_q(query)
+    q = f"fullText contains '{safe_q}' and trashed = false"
+
+    if is_user_oauth:
+        params: dict[str, str] = {
+            "q": q,
+            "corpora": "user",
+            "includeItemsFromAllDrives": "false",
+            "supportsAllDrives": "false",
+            "fields": _FIELDS,
+            "pageSize": str(page_size),
+            "orderBy": "modifiedTime desc",
+        }
+    else:
+        drive_id_eff = (drive_id or SHARED_DRIVE_ID or "").strip()
+        if not drive_id_eff:
+            return ListFilesResult(ok=False, error_kind="shared_drive_id_missing")
+        params = {
+            "q": q,
+            "corpora": "drive",
+            "driveId": drive_id_eff,
+            "includeItemsFromAllDrives": "true",
+            "supportsAllDrives": "true",
+            "fields": _FIELDS,
+            "pageSize": str(page_size),
+            "orderBy": "modifiedTime desc",
+        }
+
+    encoded = urllib.parse.urlencode(params)
+    url = f"https://www.googleapis.com/drive/v3/files?{encoded}"
+
+    try:
+        if is_user_oauth:
+            from api._auth.user_oauth import AuthRequiredError, get_user_access_token
+
+            try:
+                token = get_user_access_token(user_email or "", [_SCOPE])
+            except AuthRequiredError:
+                return ListFilesResult(ok=False, error_kind="auth_required")
+        else:
+            token = get_access_token([_SCOPE])
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/json")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        if e.code == 404:
+            logger.warning("drive list_files_by_query 404 body=%s", body)
+            return ListFilesResult(ok=False, error_kind="not_found")
+        if e.code in (401, 403):
+            logger.warning("drive list_files_by_query %s body=%s", e.code, body)
+            return ListFilesResult(ok=False, error_kind="auth_error")
+        logger.warning("drive list_files_by_query HTTP %s body=%s", e.code, body)
+        return ListFilesResult(ok=False, error_kind="http_error")
+    except Exception as e:
+        logger.warning("drive list_files_by_query 실패: %s", e)
+        return ListFilesResult(ok=False, error_kind="auth_error")
+
+    data = json.loads(payload)
+    raw_files = data.get("files") or []
+    logger.info(
+        "drive list_files_by_query source=%s drive_id=%s q=%s raw_count=%d",
+        credentials_source,
+        params.get("driveId") or "(my_drive)",
+        params.get("q") or "",
+        len(raw_files),
+    )
+    files: list[dict[str, Any]] = []
+    for item in raw_files:
+        if not isinstance(item, dict):
+            continue
+        last_user = item.get("lastModifyingUser") or {}
+        owners = item.get("owners") or []
+        first_owner = owners[0] if owners and isinstance(owners[0], dict) else {}
+        files.append(
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("name") or ""),
+                "mime_type": str(item.get("mimeType") or ""),
+                "modified_time": str(item.get("modifiedTime") or ""),
+                "web_view_link": str(item.get("webViewLink") or ""),
+                "owner_email": str(first_owner.get("emailAddress") or ""),
+                "owner_name": str(first_owner.get("displayName") or ""),
+                "last_modifier_email": str(last_user.get("emailAddress") or ""),
+                "last_modifier_name": str(last_user.get("displayName") or ""),
+                "last_modifier_is_me": bool(last_user.get("me") or False),
+            }
+        )
+    return ListFilesResult(ok=True, files=files)
+
+
+def _escape_drive_q(s: str) -> str:
+    """Drive ``q`` 문법에서 작은따옴표/백슬래시 escape."""
+    return (s or "").replace("\\", "\\\\").replace("'", "\\'")

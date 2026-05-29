@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Any, Callable
+
+# task 끝의 진행률 표기 — ' -%' 또는 ' 100%', ' 50%' 등. 시각 강조용 분리에 사용.
+_PROGRESS_SUFFIX_RE = re.compile(r"\s+(-%|\d{1,3}%)\s*$")
 
 
 def build_in_progress_card() -> dict[str, Any]:
@@ -168,15 +172,17 @@ def build_draft_card(
 def _render_draft_body(draft: dict[str, Any]) -> str:
     """draft = {projects: [...], operations: [...]} → cardsV2 textParagraph HTML.
 
-    구조 (task 간 시각 구분을 위해 빈 줄 한 칸씩):
-        <b>프로젝트</b>
-        • task1
-        &nbsp;&nbsp;◦ detail1
-        &nbsp;&nbsp;◦ detail2
-                                ← 빈 줄
-        • task2
-        ...
-        <b>운영지원</b>
+    출력 양식 — 사용자 선호에 따라 평문 ``-`` 하이픈으로 통일. 위계는 들여쓰기로만 구분.
+    진행률(100%/-%) 색상·볼드 강조는 유지. ``<font>``·``<b>`` 는 평문 복사 시 제거되므로
+    클립보드엔 ``- [1제강] 전기로 ... 100%`` 형태로 떨어져 Confluence/노션 붙여넣기에 깔끔.
+
+    구조:
+        <b>[프로젝트]</b>
+        - task1  100%               ← 100% 는 녹색·볼드
+        &nbsp;&nbsp;&nbsp;&nbsp;- detail1
+        &nbsp;&nbsp;&nbsp;&nbsp;- detail2
+                                    ← 빈 줄
+        - task2  -%                 ← -% 는 회색·볼드 (사용자가 채울 자리)
         ...
     """
     blocks: list[str] = []
@@ -191,17 +197,31 @@ def _render_draft_body(draft: dict[str, Any]) -> str:
             task = str(it.get("task") or "").strip()
             if not task:
                 continue
-            task_lines = [f"• {html.escape(task)}"]
+            task_lines = [f"- {_format_task_with_progress(task)}"]
             for d in it.get("details") or []:
                 detail = str(d or "").strip()
                 if not detail:
                     continue
-                task_lines.append(f"&nbsp;&nbsp;◦ {html.escape(detail)}")
+                task_lines.append(f"&nbsp;&nbsp;&nbsp;&nbsp;- {html.escape(detail)}")
             task_blocks.append("<br>".join(task_lines))
         if task_blocks:
-            # task 간은 붙이고 (단일 <br>), 카테고리 ↔ 카테고리 사이만 빈 줄 한 칸 (블록 join 의 <br><br>).
-            blocks.append(f"<b>{header}</b><br>" + "<br>".join(task_blocks))
+            # task 사이엔 빈 줄(<br><br>) — 본인 평소 작성 스타일이 task 간 빈 줄 분리.
+            blocks.append(f"<b>[{header}]</b><br>" + "<br><br>".join(task_blocks))
     return "<br><br>".join(blocks)
+
+
+def _format_task_with_progress(task: str) -> str:
+    """task 끝의 ' -%' / ' 100%' 진행률을 색상·볼드로 분리 강조.
+
+    매치 없으면 task 전체를 escape 만 해서 반환.
+    """
+    m = _PROGRESS_SUFFIX_RE.search(task)
+    if not m:
+        return html.escape(task)
+    head = task[: m.start()].rstrip()
+    prog = m.group(1)
+    color = "#9aa0a6" if prog == "-%" else "#1e8e3e"  # 회색 / 녹색
+    return f"{html.escape(head)} <font color=\"{color}\"><b>{prog}</b></font>"
 
 
 def _service_section(

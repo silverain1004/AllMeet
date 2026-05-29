@@ -133,6 +133,7 @@ def list_events(
                 "attendees": attendees,
                 "organizer_email": organizer_email,
                 "creator_email": creator_email,
+                "html_link": str(item.get("htmlLink") or ""),
             }
         )
     return ListEventsResult(ok=True, events=events)

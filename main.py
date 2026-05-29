@@ -141,9 +141,19 @@ def _expert_finder_like(text: str) -> bool:
     keywords = (
         "전문가",
         "잘 아는 사람",
+        "잘 아는 분",
+        "잘 하는 사람",
         "추천해",
+        "추천 좀",
         "누가 잘해",
+        "누가 잘 알아",
+        "누가 알아",
+        "알려줄 사람",
+        "알려줄 분",
         "담당자",
+        "고수",
+        "베테랑",
+        "마스터",
         "expert",
     )
     return any(k in text for k in keywords)
@@ -192,8 +202,8 @@ def _dispatch_by_intent(
             # 일상 대화: Vertex Gemini + Firestore 맥락 (domains.daily_chat.reply_daily_chat)
             return reply_daily_chat(user_message, chat_event=payload)
         case UserIntent.EXPERT_FINDER:
-            # 사내 전문가 찾기: 샘플 cardsV2 (domains.expert_finder)
-            return handle_expert_finder(user_message)
+            # 사내 전문가 찾기: 키워드 추출 → 즉시 응답 + 백그라운드 검색 thread (domains.expert_finder)
+            return handle_expert_finder(user_message, chat_event=payload)
         case UserIntent.SCHEDULE_MANAGEMENT:
             # 캘린더·일정 관리: 샘플 cardsV2 (domains.schedule_management)
             return handle_schedule_management(user_message)

@@ -1,55 +1,202 @@
-"""전문가 찾기 — 구글 챗 cardsV2 샘플로 분기 확인."""
+"""전문가 찾기 진입점 + 백그라운드 검색.
+
+흐름 (M3 범위):
+1. ``handle_expert_finder`` 가 챗 이벤트를 받아 키워드 추출.
+2. 키워드 없으면 ``build_keyword_missing_card`` 즉시 반환.
+3. 키워드 있으면 ``build_in_progress_card`` 반환 + 백그라운드 thread 시작.
+4. 백그라운드:
+   - ``build_public_sources()`` — 전사 공용 자원 풀
+   - ``search_public()`` — Drive · Confluence · Calendar 키워드 검색
+   - ``list_consenting_users()`` — OAuth 동의자 명단
+   - ``search_private()`` — Gmail · 개인 Calendar 점진 확장 (6m → 1y → 3y → 전체)
+   - ``score_candidates()`` + ``annotate_with_consent()``
+   - ``recommend()`` — Vertex Gemini 추천 멘트 (실패해도 raw 만으로 카드)
+   - 종료 케이스 4종 분기 (PLAN §6) → 결과 카드 push
+"""
 
 from __future__ import annotations
 
-import html
+import logging
+import threading
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from api.chat.messages import post_message_to_space
+from domains.expert_finder.candidates import annotate_with_consent, list_consenting_users
+from domains.expert_finder.cards import (
+    build_all_failed_card,
+    build_in_progress_card,
+    build_keyword_missing_card,
+    build_no_data_card,
+    build_no_match_card,
+    build_result_card,
+)
+from domains.expert_finder.keyword_extract import extract_keyword
+from domains.expert_finder.public_sources import build_public_sources
+from domains.expert_finder.recommend import recommend
+from domains.expert_finder.scoring import score_candidates
+from domains.expert_finder.search import search_private, search_public
 
-def _card(
-    card_id: str,
-    title: str,
-    subtitle: str,
-    body_html: str,
-    image_url: str | None = None,
+logger = logging.getLogger(__name__)
+
+# 점진 확장 윈도우 — PLAN.md §8.
+# (label, days) — days=None 이면 시간 제약 없음 (전체).
+_WINDOWS: tuple[tuple[str, int | None], ...] = (
+    ("최근 6개월", 30 * 6),
+    ("최근 1년", 365),
+    ("최근 3년", 365 * 3),
+    ("전체", None),
+)
+# 점진 확장 중단 임계값 — 매칭 동의자 수 ≥ 이 값이면 멈춤.
+_MATCHING_THRESHOLD = 3
+
+
+# 메인 진입 — 챗 이벤트 → 키워드 분기 → 즉시 응답 + 백그라운드 thread.
+def handle_expert_finder(
+    user_message: str,
+    *,
+    chat_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """cardsV2 한 장분의 최소 구조 (ui_builder.py 와 동일 최상위 키)."""
-    header: dict[str, Any] = {"title": title, "subtitle": subtitle}
-    if image_url:
-        header["imageUrl"] = image_url
-    return {
-        "cardsV2": [
-            {
-                "cardId": card_id,
-                "card": {
-                    "header": header,
-                    "sections": [
-                        {
-                            "widgets": [
-                                {"textParagraph": {"text": body_html}},
-                            ]
-                        }
-                    ],
-                },
-            }
-        ]
-    }
+    """``UserIntent.EXPERT_FINDER`` 진입점. main.py 의 dispatch 에서 호출."""
+    keyword = extract_keyword(user_message)
+    if not keyword:
+        return build_keyword_missing_card()
+
+    space_name = ((chat_event or {}).get("space") or {}).get("name") or ""
+    if not space_name:
+        # 챗 외 호출 (단순 POST 등) — 동기 처리.
+        return _run_search_sync(keyword)
+
+    threading.Thread(
+        target=_run_search_background,
+        args=(space_name, keyword),
+        daemon=False,
+    ).start()
+    return build_in_progress_card(keyword)
 
 
-def handle_expert_finder(user_message: str) -> dict[str, Any]:
-    """사내 전문가 검색·추천. 현재는 샘플 카드 + text 로 라우팅만 확인합니다."""
-    preview = html.escape((user_message or "").strip()[:120])
-    body = (
-        f"<b>[샘플] expert_finder 분기</b><br>"
-        f"입력 미리보기: <font color=\"#1a73e8\">{preview or '(비어 있음)'}</font><br><br>"
-        "실제 연동 시: 사내 프로필/스킬 검색 결과를 여기에 표시합니다."
+# 동기 실행 (챗 외 호출용).
+def _run_search_sync(keyword: str) -> dict[str, Any]:
+    try:
+        return _build_result_card(keyword)
+    except Exception:
+        logger.exception("expert_finder sync 실패: keyword=%s", keyword)
+        return build_all_failed_card()
+
+
+# 백그라운드 thread.
+def _run_search_background(space_name: str, keyword: str) -> None:
+    logger.info("expert_finder 검색 시작 space=%s keyword=%s", space_name, keyword)
+    try:
+        card = _build_result_card(keyword)
+        ok = post_message_to_space(space_name=space_name, payload=card)
+        logger.info(
+            "expert_finder 검색 완료·push %s keyword=%s",
+            "성공" if ok else "실패",
+            keyword,
+        )
+    except Exception:
+        logger.exception("expert_finder background 실패: keyword=%s", keyword)
+        post_message_to_space(space_name=space_name, payload=build_all_failed_card())
+
+
+# 공통 — 공용 + 개인(점진 확장) + 스코어링 + Vertex 추천 멘트 + 카드 선택.
+def _build_result_card(keyword: str) -> dict[str, Any]:
+    sources = build_public_sources()
+    public_hits, public_errors = search_public(keyword=keyword, sources=sources)
+    consenting = list_consenting_users()
+
+    # 개인 데이터 — 점진 확장. 매칭 동의자 수 < 3 이면 윈도우 넓힘.
+    private_hits, private_errors, used_window = _search_private_progressive(
+        keyword=keyword, consenting_emails=consenting
     )
-    out = _card(
-        "allmeet_sample_expert",
-        "사내 전문가 찾기 (샘플)",
-        "UserIntent.EXPERT_FINDER",
-        body,
-        image_url="https://www.gstatic.com/images/icons/material/system/2x/person_search_gm_blue_48dp.png",
+
+    # 공용 + 개인 모두 모든 소스 실패 → all_failed.
+    # (공용 3개 타입 모두 실패 AND 개인 2개 타입 모두 실패)
+    if (
+        len(public_errors) >= 3
+        and (not consenting or len(private_errors) >= 2)
+    ):
+        logger.info(
+            "expert_finder 모든 API 실패: public=%s private=%s",
+            public_errors,
+            private_errors,
+        )
+        return build_all_failed_card()
+
+    all_hits = list(public_hits) + list(private_hits)
+    scored = score_candidates(all_hits)
+    annotate_with_consent(scored, consenting)
+
+    if not scored:
+        if not consenting and not all_hits:
+            return build_no_data_card()
+        return build_no_match_card(keyword)
+
+    # Vertex 추천 멘트 (실패해도 raw 만으로 카드).
+    draft = recommend(keyword, scored)
+
+    logger.info(
+        "expert_finder 결과 keyword=%s window=%s public_hits=%d private_hits=%d scored=%d draft=%s",
+        keyword,
+        used_window,
+        len(public_hits),
+        len(private_hits),
+        len(scored),
+        "ok" if draft else "none",
     )
-    out["text"] = "전문가 찾기 플로우로 라우팅되었습니다. (샘플 카드)"
-    return out
+
+    return build_result_card(
+        query=keyword,
+        experts=scored,
+        window_label=used_window,
+        member_pool=sources.get("member_pool") or [],
+        draft=draft,
+    )
+
+
+# 점진 확장 — _WINDOWS 순회. 매칭 동의자 수 ≥ 임계값이면 그 윈도우에서 멈춤.
+def _search_private_progressive(
+    *,
+    keyword: str,
+    consenting_emails: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, str], str]:
+    if not consenting_emails:
+        return [], {}, _WINDOWS[0][0]
+
+    last_hits: list[dict[str, Any]] = []
+    last_errors: dict[str, str] = {}
+    used_window = _WINDOWS[-1][0]
+
+    for label, days in _WINDOWS:
+        time_min, time_max = _compute_window(days)
+        hits, errors = search_private(
+            keyword=keyword,
+            consenting_emails=consenting_emails,
+            time_min=time_min,
+            time_max=time_max,
+        )
+        last_hits = hits
+        last_errors = errors
+        used_window = label
+
+        matching_users = {(h.get("email") or "").lower() for h in hits if h.get("email")}
+        logger.info(
+            "expert_finder 점진확장 window=%s matching_users=%d",
+            label,
+            len(matching_users),
+        )
+        if len(matching_users) >= _MATCHING_THRESHOLD:
+            break
+
+    return last_hits, last_errors, used_window
+
+
+def _compute_window(days: int | None) -> tuple[str | None, str | None]:
+    """(time_min, time_max) ISO 문자열. days=None 이면 (None, None)."""
+    if days is None:
+        return None, None
+    now = datetime.now(timezone.utc)
+    time_min = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    time_max = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return time_min, time_max
