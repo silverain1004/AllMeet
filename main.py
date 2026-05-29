@@ -16,15 +16,18 @@ from typing import Any
 
 import functions_framework
 
-from domains.daily_chat import reply_daily_chat, welcome_with_capabilities_text
-from domains.expert_finder import handle_expert_finder
-from domains.schedule_management import handle_schedule_management
-from domains.weekly_meeting import (
-    build_added_to_space_reply,
-    handle_settings_request,
-    handle_weekly_meeting,
-    handle_weekly_meeting_action,
+from domains.daily_chat import (
+    build_home_menu_card,
+    build_settings_hub_card,
+    handle_home_menu_action,
+    reply_daily_chat,
 )
+from domains.expert_finder import handle_expert_finder
+from domains.schedule_management import (
+    handle_schedule_management,
+    handle_schedule_management_action,
+)
+from domains.weekly_meeting import handle_weekly_meeting, handle_weekly_meeting_action
 from domains.weekly_report import handle_weekly_report_draft
 
 logging.basicConfig(level=logging.INFO)
@@ -127,11 +130,23 @@ def _schedule_like(text: str) -> bool:
     keywords = (
         "캘린더",
         "일정",
+        "예약",
         "미팅 예약",
         "회의 예약",
         "예약해",
         "스케줄",
+        "회의실",
+        "회의 잡",
+        "잡아줘",
+        "잡아 줘",
+        "빈 시간",
+        "가능 시간",
+        "가능한 시간",
+        "참석자",
+        "초대",
         "calendar",
+        "schedule",
+        "meeting",
     )
     return any(k in text for k in keywords)
 
@@ -205,11 +220,9 @@ def _dispatch_by_intent(
             # 사내 전문가 찾기: 키워드 추출 → 즉시 응답 + 백그라운드 검색 thread (domains.expert_finder)
             return handle_expert_finder(user_message, chat_event=payload)
         case UserIntent.SCHEDULE_MANAGEMENT:
-            # 캘린더·일정 관리: 샘플 cardsV2 (domains.schedule_management)
-            return handle_schedule_management(user_message)
+            return handle_schedule_management(user_message, chat_event=payload)
         case UserIntent.SETTINGS:
-            # '설정' 키워드 — OAuth 동의 카드 단독 (domains.weekly_meeting)
-            return handle_settings_request(user_message, chat_event=payload)
+            return build_settings_hub_card()
         case UserIntent.WEEKLY_MEETING:
             # 주간 회의·팀/인원 등록: 샘플 cardsV2 (domains.weekly_meeting)
             return handle_weekly_meeting(user_message, chat_event=payload)
@@ -283,10 +296,10 @@ def hello_http(request):
             {"Content-Type": "application/json; charset=utf-8"},
         )
 
-    # 봇이 스페이스에 추가될 때 — 환영 + '내 데이터 연결' 안내 카드 (필수 셋업).
+    # 봇이 스페이스에 추가될 때 — 홈 메뉴(설정·OAuth는 6번에서).
     if payload.get("type") == "ADDED_TO_SPACE":
         return (
-            json.dumps(build_added_to_space_reply(), ensure_ascii=False),
+            json.dumps(build_home_menu_card(chat_event=payload), ensure_ascii=False),
             200,
             {"Content-Type": "application/json; charset=utf-8"},
         )
@@ -297,6 +310,21 @@ def hello_http(request):
         invoked_function = common.get("invokedFunction") or action.get("function")
         parameters = _parse_card_parameters(payload)
         form_inputs = _parse_form_inputs(payload)
+        if invoked_function and invoked_function.startswith("hm_"):
+            try:
+                reply = handle_home_menu_action(
+                    invoked_function=invoked_function,
+                    parameters=parameters,
+                    chat_event=payload,
+                )
+            except Exception:
+                logger.exception("home menu action failed: invoked_function=%s", invoked_function)
+                reply = {"text": "메뉴 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
+            return (
+                json.dumps(reply, ensure_ascii=False),
+                200,
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
         if invoked_function and invoked_function.startswith("wm_"):
             try:
                 reply = handle_weekly_meeting_action(
@@ -313,6 +341,22 @@ def hello_http(request):
                 200,
                 {"Content-Type": "application/json; charset=utf-8"},
             )
+        if invoked_function and invoked_function.startswith("sm_"):
+            try:
+                reply = handle_schedule_management_action(
+                    invoked_function=invoked_function,
+                    parameters=parameters,
+                    form_inputs=form_inputs,
+                    chat_event=payload,
+                )
+            except Exception:
+                logger.exception("schedule management action failed: invoked_function=%s", invoked_function)
+                reply = {"text": "캘린더 예약 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
+            return (
+                json.dumps(reply, ensure_ascii=False),
+                200,
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
         return (
             json.dumps({"text": "처리할 카드 액션이 없습니다."}, ensure_ascii=False),
             200,
@@ -322,7 +366,7 @@ def hello_http(request):
     user_message = _extract_user_message(payload)
     if payload.get("type") == "MESSAGE" and not user_message:
         return (
-            json.dumps({"text": welcome_with_capabilities_text()}, ensure_ascii=False),
+            json.dumps(build_home_menu_card(chat_event=payload), ensure_ascii=False),
             200,
             {"Content-Type": "application/json; charset=utf-8"},
         )

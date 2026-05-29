@@ -17,7 +17,6 @@ from typing import Any
 
 from api.chat.messages import post_message_to_space
 from config.settings import OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI
-from domains.daily_chat import welcome_with_capabilities_text
 from firestore.oauth_tokens import save_token
 from firestore.team_member_oauth_sync import sync_oauth_status
 
@@ -29,6 +28,7 @@ logger = logging.getLogger(__name__)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/drive",
     "openid",
     "email",
@@ -119,9 +119,11 @@ def handle_oauth_callback(request: Any) -> tuple[str, int, dict[str, str]]:
 
     # 챗 스페이스로 환영/능력 안내 메시지 push — 사용자가 챗 돌아왔을 때 자연스러운 다음 단계.
     if space_name:
+        from domains.daily_chat.home_menu import build_home_menu_card
+
         pushed = post_message_to_space(
             space_name=space_name,
-            payload={"text": welcome_with_capabilities_text()},
+            payload=build_home_menu_card(),
         )
         if not pushed:
             logger.warning("OAuth 완료 후 챗 push 실패: space=%s", space_name)

@@ -522,6 +522,40 @@ def update_team_shared_drive_ids(
     )
 
 
+def get_all_members() -> list[dict[str, Any]]:
+    """모든 팀의 team_members를 평탄화해 반환 (이름/이메일/팀 메타)."""
+    db = get_client()
+    out: list[dict[str, Any]] = []
+    for doc in db.collection(_CONFIG_COLLECTION).stream():
+        if doc.id == _TEAM_LIST_DOC:
+            continue
+        data = doc.to_dict() or {}
+        team_id = normalize_team_id(doc.id)
+        team_name = str(data.get("team_name") or doc.id).strip()
+        for raw in data.get("team_members") or []:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            if not name:
+                continue
+            raw_nick = raw.get("nickname")
+            if isinstance(raw_nick, list):
+                nicknames = [str(n).strip() for n in raw_nick if str(n).strip()]
+            else:
+                nicknames = [str(raw_nick).strip()] if str(raw_nick or "").strip() else []
+            email = str(raw.get("email") or "").strip()
+            out.append(
+                {
+                    "name": name,
+                    "email": email,
+                    "nickname": nicknames,
+                    "team_id": team_id,
+                    "team_name": team_name,
+                }
+            )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # weekly_report 도메인 진입용 — 이메일 → 팀 매칭 / 글로벌 토큰
 # ---------------------------------------------------------------------------
