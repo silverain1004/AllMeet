@@ -95,7 +95,10 @@ def list_events(
             return ListEventsResult(ok=False, error_kind="not_found")
         if e.code in (401, 403):
             logger.warning("calendar list_events %s calendar_id=%s source=%s body=%s", e.code, calendar_id, credentials_source, body)
-            return ListEventsResult(ok=False, error_kind="auth_error")
+            # user_oauth 경로의 401/403 은 토큰 스코프 미동의/만료 → 재연결 안내(auth_required).
+            # service_account 경로는 SA 가 캘린더 공유 안 된 설정 오류 → auth_error 로 구분.
+            kind = "auth_required" if credentials_source == "user_oauth" else "auth_error"
+            return ListEventsResult(ok=False, error_kind=kind)
         logger.warning("calendar list_events HTTP %s body=%s", e.code, body)
         return ListEventsResult(ok=False, error_kind="http_error")
     except Exception as e:
