@@ -73,29 +73,39 @@ def build_draft_card(
         }
     )
 
-    # 회의 이력
-    sections.append(
-        _service_section(
+    # Vertex 종합 초안 — 맨 위로. 사용자가 가장 먼저 보고 복사하는 결과물.
+    if draft:
+        body = _render_draft_body(draft)
+        if body:
+            sections.append(
+                {
+                    "header": "✏️ 종합 초안",
+                    "widgets": [{"textParagraph": {"text": body}}],
+                }
+            )
+
+    # 원천 데이터 — 초안 근거. 접을 수 있는(collapsible) 섹션 하나로 묶어 아래로.
+    # 각 서비스를 textParagraph 위젯 1개로 만들어 한 아코디언 안에 모음.
+    source_widgets: list[dict[str, Any]] = []
+
+    source_widgets.append(
+        _service_widget(
             header="📅 회의 이력",
             items=raw.get("calendar") or [],
             error=errors.get("calendar"),
             fmt=lambda e: f"{(e.get('summary') or '-')} ({(e.get('start') or '-')[:10]})",
         )
     )
-
-    # Drive
-    sections.append(
-        _service_section(
+    source_widgets.append(
+        _service_widget(
             header="📁 Drive 작성/수정 파일",
             items=raw.get("drive") or [],
             error=errors.get("drive"),
             fmt=lambda f: f"{(f.get('name') or '-')} ({(f.get('modified_time') or '-')[:10]})",
         )
     )
-
-    # Confluence
-    sections.append(
-        _service_section(
+    source_widgets.append(
+        _service_widget(
             header="📄 Confluence 페이지",
             items=raw.get("confluence") or [],
             error=errors.get("confluence"),
@@ -103,12 +113,12 @@ def build_draft_card(
         )
     )
 
-    # Gmail (Phase 2 — error 가 auth_required 면 안내, 미연결이면 섹션 자체 생략)
+    # Gmail (Phase 2 — error 가 auth_required 면 안내, 미연결이면 위젯 자체 생략)
     gmail_error = errors.get("gmail")
     gmail_items = raw.get("gmail") or []
     if gmail_error or gmail_items:
-        sections.append(
-            _service_section(
+        source_widgets.append(
+            _service_widget(
                 header="📧 Gmail",
                 items=gmail_items,
                 error=gmail_error,
@@ -120,8 +130,8 @@ def build_draft_card(
     personal_cal_error = errors.get("personal_calendar")
     personal_cal_items = raw.get("personal_calendar") or []
     if personal_cal_error or personal_cal_items:
-        sections.append(
-            _service_section(
+        source_widgets.append(
+            _service_widget(
                 header="🗓️ 개인 일정",
                 items=personal_cal_items,
                 error=personal_cal_error,
@@ -133,8 +143,8 @@ def build_draft_card(
     personal_drv_error = errors.get("personal_drive")
     personal_drv_items = raw.get("personal_drive") or []
     if personal_drv_error or personal_drv_items:
-        sections.append(
-            _service_section(
+        source_widgets.append(
+            _service_widget(
                 header="📁 내 드라이브",
                 items=personal_drv_items,
                 error=personal_drv_error,
@@ -142,16 +152,16 @@ def build_draft_card(
             )
         )
 
-    # Vertex 종합 초안 — 프로젝트 / 운영지원 두 카테고리.
-    if draft:
-        body = _render_draft_body(draft)
-        if body:
-            sections.append(
-                {
-                    "header": "✏️ 종합 초안",
-                    "widgets": [{"textParagraph": {"text": body}}],
-                }
-            )
+    if source_widgets:
+        # collapsible=True + uncollapsibleWidgetsCount=0 → 헤더만 보이고 전체 접힘(아코디언).
+        sections.append(
+            {
+                "header": "📎 참고한 원천 데이터",
+                "collapsible": True,
+                "uncollapsibleWidgetsCount": 0,
+                "widgets": source_widgets,
+            }
+        )
 
     return {
         "cardsV2": [
@@ -224,25 +234,37 @@ def _format_task_with_progress(task: str) -> str:
     return f"{html.escape(head)} <font color=\"{color}\"><b>{prog}</b></font>"
 
 
-def _service_section(
+def _service_widget(
     *,
     header: str,
     items: list[Any],
     error: str | None,
     fmt: Callable[[Any], str],
 ) -> dict[str, Any]:
+    """원천 데이터 한 항목 — 헤더(볼드) + 본문을 textParagraph 위젯 하나로.
+
+    collapsible 섹션 안에 여러 서비스를 모으기 위해 섹션이 아닌 위젯 단위로 반환.
+    """
+    body = _service_body(items=items, error=error, fmt=fmt)
+    return {"textParagraph": {"text": f"<b>{header}</b><br>{body}"}}
+
+
+def _service_body(
+    *,
+    items: list[Any],
+    error: str | None,
+    fmt: Callable[[Any], str],
+) -> str:
     if error == "auth_required":
-        body = "🔒 OAuth 미연결 — '내 데이터 연결' 카드를 클릭해 권한을 부여해 주세요."
-    elif error == "shared_drive_id_missing":
-        body = "⚠️ Shared Drive ID 미설정 — `SHARED_DRIVE_ID` 환경변수 확인 필요."
-    elif error == "space_key_missing":
-        body = "⚠️ Confluence 스페이스 키 미설정 — 팀 설정에서 `space_key` 확인 필요."
-    elif error == "calendar_id_missing":
-        body = "⚠️ 팀 캘린더 ID 미설정."
-    elif error:
-        body = f"⚠️ 조회 실패 ({html.escape(error)})"
-    elif not items:
-        body = "(이 한 주에 활동이 없어요)"
-    else:
-        body = "<br>".join(f"{i + 1}. {html.escape(fmt(it))}" for i, it in enumerate(items))
-    return {"header": header, "widgets": [{"textParagraph": {"text": body}}]}
+        return "🔒 OAuth 미연결 — '내 데이터 연결' 카드를 클릭해 권한을 부여해 주세요."
+    if error == "shared_drive_id_missing":
+        return "⚠️ Shared Drive ID 미설정 — `SHARED_DRIVE_ID` 환경변수 확인 필요."
+    if error == "space_key_missing":
+        return "⚠️ Confluence 스페이스 키 미설정 — 팀 설정에서 `space_key` 확인 필요."
+    if error == "calendar_id_missing":
+        return "⚠️ 팀 캘린더 ID 미설정."
+    if error:
+        return f"⚠️ 조회 실패 ({html.escape(error)})"
+    if not items:
+        return "(이 한 주에 활동이 없어요)"
+    return "<br>".join(f"{i + 1}. {html.escape(fmt(it))}" for i, it in enumerate(items))

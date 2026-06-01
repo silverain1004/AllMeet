@@ -217,6 +217,7 @@ def _collect_all_services(
         merged: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         per_drive_errors: list[str] = []
+        per_drive_kinds: list[str] = []
         for d_id in drive_ids:
             try:
                 # 사용자 OAuth 로 Shared Drive 조회 — 외부 SA 호출 시 lastModifyingUser.emailAddress
@@ -251,12 +252,19 @@ def _collect_all_services(
                         merged.append(f)
                 else:
                     per_drive_errors.append(f"{d_id}:{drv_res.error_kind or 'unknown'}")
+                    per_drive_kinds.append(drv_res.error_kind or "unknown")
             except Exception as e:
                 logger.warning("drive 호출 예외 drive_id=%s: %s", d_id, e)
                 per_drive_errors.append(f"{d_id}:exception")
+                per_drive_kinds.append("exception")
         raw["drive"] = merged
         if per_drive_errors and not merged:
-            errors["drive"] = ";".join(per_drive_errors)
+            # 모든 드라이브가 동일하게 OAuth 미동의면 카드가 'OAuth 미연결' 안내를 띄우도록 정규화
+            # (그 외에는 디버깅 위해 "{drive_id}:{kind}" 원문 유지).
+            if per_drive_kinds and all(k == "auth_required" for k in per_drive_kinds):
+                errors["drive"] = "auth_required"
+            else:
+                errors["drive"] = ";".join(per_drive_errors)
     else:
         try:
             drv_res = list_files_modified(

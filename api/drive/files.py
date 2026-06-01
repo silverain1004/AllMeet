@@ -150,7 +150,11 @@ def list_files_modified(
             return ListFilesResult(ok=False, error_kind="not_found")
         if e.code in (401, 403):
             logger.warning("drive list_files %s source=%s body=%s", e.code, credentials_source, body)
-            return ListFilesResult(ok=False, error_kind="auth_error")
+            # user_oauth 경로의 401/403 은 토큰 스코프 미동의/만료 → 재연결 안내(auth_required).
+            # service_account 경로는 SA 가 드라이브 멤버 아님 → auth_error 로 구분.
+            return ListFilesResult(
+                ok=False, error_kind="auth_required" if is_user_oauth else "auth_error"
+            )
         logger.warning("drive list_files HTTP %s body=%s", e.code, body)
         return ListFilesResult(ok=False, error_kind="http_error")
     except Exception as e:
@@ -277,8 +281,11 @@ def list_files_by_query(
             logger.warning("drive list_files_by_query 404 body=%s", body)
             return ListFilesResult(ok=False, error_kind="not_found")
         if e.code in (401, 403):
-            logger.warning("drive list_files_by_query %s body=%s", e.code, body)
-            return ListFilesResult(ok=False, error_kind="auth_error")
+            logger.warning("drive list_files_by_query %s source=%s body=%s", e.code, credentials_source, body)
+            # user_oauth 경로의 401/403 은 토큰 스코프 미동의/만료 → 재연결 안내(auth_required).
+            return ListFilesResult(
+                ok=False, error_kind="auth_required" if is_user_oauth else "auth_error"
+            )
         logger.warning("drive list_files_by_query HTTP %s body=%s", e.code, body)
         return ListFilesResult(ok=False, error_kind="http_error")
     except Exception as e:
