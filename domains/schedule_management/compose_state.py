@@ -6,6 +6,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 KST = timezone(timedelta(hours=9))
+UTC = timezone.utc
+
+ATTENDEE_COUNT_OPTIONS: tuple[int, ...] = (4, 8, 10, 15)
 _ATT_SEP = "\x1f"
 _PIPE = "|"
 
@@ -16,7 +19,7 @@ def empty_compose_state() -> dict[str, Any]:
         "meeting_date": "",
         "meeting_time": "",
         "meeting_end_time": "",
-        "duration_mode": "1h",
+        "duration_mode": "",
         "compose_step": "quick",
         "attendee_count": None,
         "title": "",
@@ -31,7 +34,7 @@ def empty_compose_state() -> dict[str, Any]:
         "auto_meet": False,
         "pending_candidates": [],
         "errors": [],
-        "duration_minutes": 60,
+        "duration_minutes": 0,
         "last_reservation_id": "",
         "last_event_id": "",
         "last_api_calendar_id": "",
@@ -68,7 +71,7 @@ def state_to_button_params(state: dict[str, Any]) -> dict[str, str]:
     ac = state.get("attendee_count")
     return {
         "compose_step": str(state.get("compose_step") or "quick"),
-        "duration_mode": str(state.get("duration_mode") or "1h"),
+        "duration_mode": str(state.get("duration_mode") or ""),
         "meeting_date": str(state.get("meeting_date") or ""),
         "meeting_time": str(state.get("meeting_time") or ""),
         "meeting_end_time": str(state.get("meeting_end_time") or ""),
@@ -83,7 +86,7 @@ def state_to_button_params(state: dict[str, Any]) -> dict[str, str]:
         "equipment_keywords": ",".join(state.get("equipment_keywords") or []),
         "location_keyword": str(state.get("location_keyword") or ""),
         "room_name_keyword": str(state.get("room_name_keyword") or ""),
-        "duration_minutes": str(state.get("duration_minutes") or 60),
+        "duration_minutes": str(state.get("duration_minutes") or ""),
         "last_reservation_id": str(state.get("last_reservation_id") or ""),
         "last_event_id": str(state.get("last_event_id") or ""),
         "last_api_calendar_id": str(state.get("last_api_calendar_id") or ""),
@@ -101,7 +104,8 @@ def _safe_form_value(form_inputs: dict[str, Any], key: str) -> str:
         ms = date_input.get("msSinceEpoch")
         if ms is not None:
             try:
-                dt = datetime.fromtimestamp(int(ms) / 1000.0, tz=KST)
+                # DATE_ONLY: Chat은 선택한 날짜의 UTC 00:00 ms를 보냄
+                dt = datetime.fromtimestamp(int(ms) / 1000.0, tz=UTC)
                 return dt.strftime("%Y-%m-%d")
             except (ValueError, OSError):
                 pass
@@ -118,9 +122,17 @@ def compose_state_from(
     state["calendar_id"] = _safe_form_value(form_inputs, "calendar_id") or parameters.get(
         "calendar_id", ""
     )
-    state["meeting_date"] = _safe_form_value(form_inputs, "meeting_date") or parameters.get(
-        "meeting_date", ""
-    )
+    if "meeting_date" in parameters and not _safe_form_value(form_inputs, "meeting_date"):
+
+        state["meeting_date"] = str(parameters.get("meeting_date") or "")
+
+    else:
+
+        state["meeting_date"] = _safe_form_value(form_inputs, "meeting_date") or parameters.get(
+
+            "meeting_date", ""
+
+        )
     state["meeting_time"] = _safe_form_value(form_inputs, "meeting_time") or parameters.get(
         "meeting_time", ""
     )
@@ -130,7 +142,6 @@ def compose_state_from(
     state["duration_mode"] = (
         _safe_form_value(form_inputs, "duration_mode")
         or parameters.get("duration_mode", "")
-        or "1h"
     )
     state["compose_step"] = parameters.get("compose_step", "") or "quick"
     ac_raw = _safe_form_value(form_inputs, "attendee_count") or parameters.get("attendee_count", "")
@@ -154,17 +165,21 @@ def compose_state_from(
         state["equipment_keywords"] = [x.strip() for x in eq.split(",") if x.strip()]
     state["location_keyword"] = parameters.get("location_keyword", "")
     state["room_name_keyword"] = parameters.get("room_name_keyword", "")
-    try:
-        state["duration_minutes"] = int(parameters.get("duration_minutes") or 60)
-    except ValueError:
-        state["duration_minutes"] = 60
+    dm_raw = parameters.get("duration_minutes", "")
+    if dm_raw:
+        try:
+            state["duration_minutes"] = int(dm_raw)
+        except ValueError:
+            state["duration_minutes"] = 0
     apply_duration_mode(state)
     return state
 
 
 def apply_duration_mode(state: dict[str, Any]) -> None:
     """duration_mode에 따라 duration_minutes를 동기화."""
-    mode = str(state.get("duration_mode") or "1h")
+    mode = str(state.get("duration_mode") or "").strip()
+    if not mode:
+        return
     if mode == "1h":
         state["duration_minutes"] = 60
     elif mode == "2h":
@@ -186,9 +201,11 @@ def apply_duration_mode(state: dict[str, Any]) -> None:
 
 def resolve_end_time(state: dict[str, Any]) -> str:
     """표시·예약용 종료 시각(HH:MM)."""
-    mode = str(state.get("duration_mode") or "1h")
+    mode = str(state.get("duration_mode") or "").strip()
     date = str(state.get("meeting_date") or "").strip()
     start = str(state.get("meeting_time") or "").strip()
+    if not mode:
+        return ""
     if mode == "custom":
         return str(state.get("meeting_end_time") or "").strip()
     if not date or not start:

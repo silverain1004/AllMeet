@@ -265,6 +265,7 @@ def handle_home_menu_action(
         if isinstance(reply, dict):
             reply = dict(reply)
             reply.setdefault("text", "회의 예약 화면입니다. 항목을 확인한 뒤 확정해 주세요.")
+            reply.setdefault("actionResponse", {"type": "UPDATE_MESSAGE"})
         return reply
 
     if fn == "hm_weekly_draft":

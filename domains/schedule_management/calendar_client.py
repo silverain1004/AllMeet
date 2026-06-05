@@ -22,16 +22,17 @@ WRITE_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
 
 def is_dry_run() -> bool:
-    raw = (os.environ.get("SCHEDULE_DRY_RUN") or "true").strip().lower()
+    raw = (os.environ.get("SCHEDULE_DRY_RUN") or "false").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
 @dataclass
 class CalendarResult:
     ok: bool
-    events: list[dict[str, str]] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     busy: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     created_event: dict[str, Any] | None = None
+    calendar_list_items: list[dict[str, Any]] = field(default_factory=list)
     error_kind: str = ""
     detail: str = ""
 
@@ -60,23 +61,41 @@ def _refresh_and_get_token(creds: Any) -> str:
     return str(token)
 
 
-def _get_service_account_token(*, write: bool = False) -> str:
+def _get_service_account_credentials(
+    *,
+    write: bool = False,
+    subject_email: str | None = None,
+) -> Any:
     scopes = WRITE_SCOPES if write else READ_SCOPES
+    creds: Any = None
     try:
         creds, _ = google.auth.default(scopes=scopes)
-        return _refresh_and_get_token(creds)
     except Exception:
-        pass
-    key_file = os.environ.get("GOOGLE_CALENDAR_KEY_FILE") or os.environ.get(
-        "GOOGLE_APPLICATION_CREDENTIALS"
-    )
-    if key_file:
-        try:
-            creds = service_account.Credentials.from_service_account_file(key_file, scopes=scopes)
-            return _refresh_and_get_token(creds)
-        except Exception:
-            pass
-    raise RuntimeError("calendar_auth_error")
+        creds = None
+    if creds is None:
+        key_file = os.environ.get("GOOGLE_CALENDAR_KEY_FILE") or os.environ.get(
+            "GOOGLE_APPLICATION_CREDENTIALS"
+        )
+        if key_file:
+            try:
+                creds = service_account.Credentials.from_service_account_file(key_file, scopes=scopes)
+            except Exception:
+                creds = None
+    if creds is None:
+        raise RuntimeError("calendar_auth_error")
+    subject = (subject_email or "").strip()
+    if subject and hasattr(creds, "with_subject"):
+        creds = creds.with_subject(subject)
+    return creds
+
+
+def _get_service_account_token(
+    *,
+    write: bool = False,
+    subject_email: str | None = None,
+) -> str:
+    creds = _get_service_account_credentials(write=write, subject_email=subject_email)
+    return _refresh_and_get_token(creds)
 
 
 def _http_error_kind(code: int) -> str:
@@ -129,6 +148,49 @@ def _request(
         return None, CalendarResult(ok=False, error_kind="calendar_http_error", detail=str(e))
 
 
+def _merge_attendees(
+    people: list[str] | None,
+    resource_emails: list[str] | None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for email in people or []:
+        e = str(email or "").strip()
+        if e and e not in seen:
+            out.append({"email": e})
+            seen.add(e)
+    for rid in resource_emails or []:
+        e = str(rid or "").strip()
+        if e and e not in seen:
+            out.append({"email": e, "resource": True})
+            seen.add(e)
+    return out
+
+
+def list_calendar_list(
+    *,
+    access_token: str | None = None,
+    subject_email: str | None = None,
+    max_results: int = 250,
+) -> CalendarResult:
+    url = f"https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults={max_results}"
+    token = access_token
+    if not token:
+        try:
+            token = _get_service_account_token(write=False, subject_email=subject_email)
+        except RuntimeError as e:
+            return CalendarResult(ok=False, error_kind="calendar_auth_error", detail=str(e))
+    data, err = _request(url=url, method="GET", write=False, access_token=token)
+    if err is not None:
+        return err
+    items = (data or {}).get("items") or []
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            out.append(item)
+    return CalendarResult(ok=True, calendar_list_items=out)
+
+
 def extract_meet_link(event: dict[str, Any] | None) -> str:
     if not event:
         return ""
@@ -171,12 +233,24 @@ def list_events(
     if err is not None:
         return err
     items = (data or {}).get("items") or []
-    out = []
+    out: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
         start = item.get("start") or {}
         end = item.get("end") or {}
+        attendees_raw = item.get("attendees") or []
+        attendees: list[dict[str, Any]] = []
+        for att in attendees_raw:
+            if not isinstance(att, dict):
+                continue
+            attendees.append(
+                {
+                    "email": str(att.get("email") or "").strip(),
+                    "displayName": str(att.get("displayName") or "").strip(),
+                    "resource": bool(att.get("resource")),
+                }
+            )
         out.append(
             {
                 "id": str(item.get("id") or ""),
@@ -184,6 +258,8 @@ def list_events(
                 "start": str(start.get("dateTime") or start.get("date") or ""),
                 "end": str(end.get("dateTime") or end.get("date") or ""),
                 "html_link": str(item.get("htmlLink") or ""),
+                "location": str(item.get("location") or "").strip(),
+                "attendees": attendees,
             }
         )
     return CalendarResult(ok=True, events=out)
@@ -235,6 +311,7 @@ def create_event(
     start_iso: str,
     end_iso: str,
     attendees: list[str] | None = None,
+    resource_emails: list[str] | None = None,
     location: str = "",
     description: str = "",
     time_zone: str = "Asia/Seoul",
@@ -266,8 +343,9 @@ def create_event(
         body["location"] = location
     if description:
         body["description"] = description
-    if attendees:
-        body["attendees"] = [{"email": e} for e in attendees if e]
+    merged_attendees = _merge_attendees(attendees, resource_emails)
+    if merged_attendees:
+        body["attendees"] = merged_attendees
     if add_google_meet:
         body["conferenceData"] = {
             "createRequest": {
@@ -317,6 +395,8 @@ def patch_event(
     start_iso: str | None = None,
     end_iso: str | None = None,
     location: str | None = None,
+    attendees: list[str] | None = None,
+    resource_emails: list[str] | None = None,
     time_zone: str = "Asia/Seoul",
     access_token: str | None = None,
 ) -> CalendarResult:
@@ -333,6 +413,10 @@ def patch_event(
         body["end"] = {"dateTime": end_iso, "timeZone": time_zone}
     if location is not None:
         body["location"] = location
+    if attendees is not None or resource_emails is not None:
+        merged = _merge_attendees(attendees, resource_emails)
+        if merged:
+            body["attendees"] = merged
     if not body:
         return CalendarResult(ok=False, error_kind="event_field_missing")
     url = (

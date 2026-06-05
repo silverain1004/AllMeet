@@ -78,6 +78,37 @@ def test_score_rooms_prefers_capacity():
     assert scored[0][0]["id"] == "b"
 
 
+def test_recommend_rooms_filters_by_minimum_capacity():
+    from domains.schedule_management.rooms import recommend_rooms
+
+    state = {
+        "meeting_date": "",
+        "meeting_time": "",
+        "duration_mode": "",
+        "attendees": [],
+        "attendee_count": 15,
+        "equipment_keywords": [],
+    }
+    rooms = recommend_rooms(state, access_token=None)
+    capacities = [int(r.get("capacity") or 0) for r in rooms]
+    assert capacities
+    assert all(c >= 15 or c == 0 for c in capacities)
+
+
+def test_attendee_count_button_selection_filled():
+    from domains.schedule_management.cards import build_quick_compose_card
+    from domains.schedule_management.compose_state import empty_compose_state
+
+    state = empty_compose_state()
+    state["attendee_count"] = 8
+    out = build_quick_compose_card(state, recommended_rooms=[])
+    widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
+    buttons = widgets[2]["buttonList"]["buttons"]
+    filled = [b for b in buttons if b.get("type") == "FILLED"]
+    assert len(filled) == 1
+    assert filled[0]["text"] == "8+"
+
+
 def test_recommend_rooms_uses_attendee_count():
     from domains.schedule_management.rooms import score_rooms
 
@@ -99,11 +130,11 @@ def test_get_rooms_fallback_dummy():
     assert len(rooms) >= 3
 
 
-def test_is_dry_run_default_true(monkeypatch):
+def test_is_dry_run_default_false(monkeypatch):
     from domains.schedule_management.calendar_client import is_dry_run
 
     monkeypatch.delenv("SCHEDULE_DRY_RUN", raising=False)
-    assert is_dry_run() is True
+    assert is_dry_run() is False
 
 
 def test_quick_compose_card_widgets():
@@ -114,17 +145,168 @@ def test_quick_compose_card_widgets():
     out = build_quick_compose_card(state, recommended_rooms=[])
     assert out["cardsV2"][0]["cardId"] == "sm_compose_quick"
     widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
-    assert any("dateTimePicker" in w for w in widgets)
-    assert any(
-        w.get("selectionInput", {}).get("type") == "RADIO_BUTTON"
-        for w in widgets
-    )
+    assert widgets[0]["textParagraph"]["text"] == "<b>회의일자</b>"
+    picker = widgets[1]["dateTimePicker"]
+    assert picker["name"] == "meeting_date"
+    assert picker["type"] == "DATE_ONLY"
+    assert picker["timezoneOffsetDate"] == 540
+    assert picker["onChangeAction"]["function"] == "sm_compose_quick_update"
+    assert "onChangeAction" not in widgets[1]
+    ac_buttons = widgets[2]["buttonList"]["buttons"]
+    assert [b["text"] for b in ac_buttons] == ["4+", "8+", "10+", "15+"]
+    assert not any(b.get("type") == "FILLED" for b in ac_buttons)
+    assert "columns" in widgets[3]
+    radio = widgets[4]["selectionInput"]
+    assert radio["type"] == "RADIO_BUTTON"
+    assert not any(item.get("selected") for item in radio["items"])
     assert not any(
         b.get("text") == "예약 확정"
         for w in widgets
         if "buttonList" in w
         for b in w["buttonList"]["buttons"]
     )
+
+
+def test_quick_compose_shows_date_display_when_prefilled():
+    from domains.schedule_management.cards import build_quick_compose_card
+    from domains.schedule_management.compose_state import empty_compose_state
+
+    state = empty_compose_state()
+    state["meeting_date"] = "2026-06-05"
+    out = build_quick_compose_card(state, recommended_rooms=[])
+    widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
+    assert "dateTimePicker" not in widgets[1]
+    assert widgets[1]["decoratedText"]["text"] == "2026-06-05"
+    assert widgets[1]["decoratedText"]["button"]["text"] == "변경"
+
+
+def test_compose_state_clear_meeting_date_via_parameters():
+    from domains.schedule_management.compose_state import compose_state_from
+
+    state = compose_state_from({"meeting_date": ""}, {})
+    assert state["meeting_date"] == ""
+
+
+def test_handle_schedule_extracts_date_from_natural_language():
+    from domains.schedule_management.handler import handle_schedule_management
+
+    out = handle_schedule_management("내일 오후 3시 회의", chat_event={"user": {"email": "u@x.com"}})
+    widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
+    assert "dateTimePicker" not in str(widgets[1])
+    assert out["cardsV2"][0]["cardId"] == "sm_compose_quick"
+
+
+def test_date_input_ms_parsed_as_utc_not_kst():
+    from datetime import datetime, timezone
+
+    from domains.schedule_management.compose_state import compose_state_from
+
+    utc = timezone.utc
+    ms = str(int(datetime(2026, 6, 5, tzinfo=utc).timestamp() * 1000))
+    state = compose_state_from({}, {"meeting_date": {"dateInput": {"msSinceEpoch": ms}}})
+    assert state["meeting_date"] == "2026-06-05"
+
+
+def test_duration_mode_default_empty():
+    from domains.schedule_management.compose_state import empty_compose_state
+
+    state = empty_compose_state()
+    assert state["duration_mode"] == ""
+    assert state["duration_minutes"] == 0
+
+
+def test_validate_time_requires_duration_mode():
+    from domains.schedule_management.handler import _validate_time_state
+
+    state = {
+        "meeting_date": "2026-05-10",
+        "meeting_time": "10:00",
+        "duration_mode": "",
+        "meeting_end_time": "",
+    }
+    errors = _validate_time_state(state)
+    assert any("회의 시간" in e for e in errors)
+
+
+def test_room_display_line_and_availability_labels():
+    from domains.schedule_management.rooms import recommend_rooms
+
+    state = {
+        "meeting_date": "2026-05-10",
+        "meeting_time": "10:00",
+        "duration_mode": "1h",
+        "duration_minutes": 60,
+        "attendees": [],
+        "attendee_count": 4,
+        "equipment_keywords": [],
+    }
+    rooms = recommend_rooms(state, access_token=None)
+    assert rooms
+    row = rooms[0]
+    assert "V-Room" in row.get("display_name", row.get("name", ""))
+    assert row["display_line"].startswith("수용 ")
+    assert "|" in row["display_line"]
+    assert "빔프로젝터" in row["display_line"]
+    assert row.get("show_availability")
+    assert row["availability_label"] in ("사용 가능", "사용 중")
+
+
+def test_room_availability_without_duration_mode():
+    from domains.schedule_management.rooms import recommend_rooms
+
+    state = {
+        "meeting_date": "2026-05-10",
+        "meeting_time": "10:00",
+        "duration_mode": "",
+        "duration_minutes": 0,
+        "attendees": [],
+        "attendee_count": 4,
+        "equipment_keywords": [],
+    }
+    rooms = recommend_rooms(state, access_token=None)
+    assert rooms
+    assert rooms[0].get("show_availability")
+    assert rooms[0]["availability_label"] in ("사용 가능", "사용 중")
+
+
+def test_quick_compose_room_widgets_show_availability():
+    from domains.schedule_management.cards import build_quick_compose_card
+    from domains.schedule_management.compose_state import empty_compose_state
+    from domains.schedule_management.gunsan_rooms import gunsan_rooms_from_catalog
+
+    state = empty_compose_state()
+    state["meeting_date"] = "2026-05-10"
+    state["meeting_time"] = "10:00"
+    rooms = gunsan_rooms_from_catalog()
+    for room in rooms:
+        room["show_availability"] = True
+        room["availability_label"] = "사용 가능"
+        room["display_line"] = f"수용 {room['capacity']}명 | 빔프로젝터, 모니터"
+    out = build_quick_compose_card(state, recommended_rooms=rooms)
+    widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
+    room_widget = next(
+        w
+        for w in widgets
+        if "decoratedText" in w and "선택" in str(w.get("decoratedText", {}).get("button", {}))
+    )
+    top = room_widget["decoratedText"]["topLabel"]
+    text = room_widget["decoratedText"]["text"]
+    assert "사용 가능" in top
+    assert text.startswith("수용 ")
+    assert "|" in text
+
+
+def test_member_suggestion_items_name_email_only():
+    from domains.schedule_management.cards import _member_suggestion_items
+
+    members = [
+        {"name": "이민규", "email": "imk1984@vntgcorp.com"},
+        {"name": "김철수", "email": "kim@x.com"},
+    ]
+    items = _member_suggestion_items(members)
+    texts = [i["text"] for i in items]
+    assert texts == ["이민규 (imk1984@vntgcorp.com)", "김철수 (kim@x.com)"]
+    assert "imk1984@vntgcorp.com" not in texts
 
 
 def test_full_compose_card_has_suggestions():
@@ -145,9 +327,43 @@ def test_full_compose_card_has_suggestions():
     )
     assert out["cardsV2"][0]["cardId"] == "sm_compose_full"
     widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
-    attendee_widgets = [w for w in widgets if w.get("textInput", {}).get("name") == "attendee_input"]
-    assert attendee_widgets
-    assert "initialSuggestions" in attendee_widgets[0]["textInput"]
+    def _find_attendee_input(widget_list: list[dict]) -> dict | None:
+        for w in widget_list:
+            if w.get("textInput", {}).get("name") == "attendee_input":
+                return w["textInput"]
+            if "columns" in w:
+                for col in w["columns"]["columnItems"]:
+                    found = _find_attendee_input(col.get("widgets") or [])
+                    if found:
+                        return found
+        return None
+
+    attendee_field = _find_attendee_input(widgets)
+    assert attendee_field
+    assert "initialSuggestions" in attendee_field
+    assert "label" not in attendee_field
+    assert "placeholderText" not in attendee_field
+    attendee_columns = [
+        w for w in widgets if "columns" in w and any(
+            "attendee_input" in str(col)
+            for col in w["columns"]["columnItems"]
+        )
+    ]
+    assert attendee_columns
+    meet_columns = [
+        w for w in widgets if "columns" in w and any(
+            "화상회의" in str(col) for col in w["columns"]["columnItems"]
+        )
+    ]
+    assert meet_columns
+    footer = next(
+        w
+        for w in widgets
+        if any(b.get("text") == "예약 확정" for b in (w.get("buttonList", {}).get("buttons") or []))
+    )
+    footer_texts = [b["text"] for b in footer["buttonList"]["buttons"]]
+    assert footer_texts == ["홈으로", "회의실수정", "예약 확정"]
+    assert footer["buttonList"]["buttons"][-1]["type"] == "FILLED"
 
 
 @pytest.fixture
@@ -417,4 +633,201 @@ def test_compose_confirm_calls_create_event(patch_members, monkeypatch):
     text = str(out)
     assert "예약이 생성되었습니다" in text
     assert "meet.google.com" in text
-    assert "참석 인원: 8명" in text
+    assert "참석 인원: 8+" in text
+
+
+def test_parse_capacity_from_room_name():
+    from domains.schedule_management.gunsan_rooms import parse_capacity_from_name
+
+    assert parse_capacity_from_name("VNTG 군산 V-Room (18)") == 18
+    assert parse_capacity_from_name("VNTG 군산 T-Room (4)") == 4
+    assert parse_capacity_from_name("이름 없음") == 10
+
+
+def test_gunsan_catalog_has_three_rooms_with_capacity():
+    from domains.schedule_management.gunsan_rooms import gunsan_rooms_from_catalog
+
+    rooms = gunsan_rooms_from_catalog()
+    assert len(rooms) == 3
+    caps = {r["name"]: r["capacity"] for r in rooms}
+    assert caps["VNTG 군산 V-Room (18)"] == 18
+    assert caps["VNTG 군산 N-Room (12)"] == 12
+    assert caps["VNTG 군산 T-Room (4)"] == 4
+    assert all(r["calendar_resource_id"].endswith("@resource.calendar.google.com") for r in rooms)
+
+
+def test_merge_attendees_includes_resource():
+    from domains.schedule_management.calendar_client import _merge_attendees
+
+    merged = _merge_attendees(["u@x.com"], ["room@resource.calendar.google.com"])
+    assert {"email": "u@x.com"} in merged
+    assert {"email": "room@resource.calendar.google.com", "resource": True} in merged
+
+
+def test_sync_rooms_from_manual_ids(monkeypatch):
+    from domains.schedule_management import rooms_sync as rs
+
+    stored: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        rs,
+        "get_room_calendar_config",
+        lambda: {
+            "group_calendar_id": "",
+            "sync_name_filter": "군산",
+            "room_resource_ids": [
+                "gunsan-a@resource.calendar.google.com",
+                "gunsan-b@resource.calendar.google.com",
+            ],
+            "room_catalog": [
+                {
+                    "name": "VNTG 군산 V-Room (18)",
+                    "calendar_resource_id": "gunsan-a@resource.calendar.google.com",
+                    "location": "브이엔티지(군산)-3층",
+                },
+                {
+                    "name": "VNTG 군산 N-Room (12)",
+                    "calendar_resource_id": "gunsan-b@resource.calendar.google.com",
+                    "location": "브이엔티지(군산)-3층",
+                },
+            ],
+            "impersonate_email": "",
+        },
+    )
+    monkeypatch.setattr(rs, "upsert_rooms", lambda rooms: stored.extend(rooms))
+
+    count, msg = rs.sync_resource_rooms_from_calendar_list()
+    assert count == 2
+    assert "수동 등록" in msg
+    assert stored[0]["calendar_resource_id"] == "gunsan-a@resource.calendar.google.com"
+    assert stored[0]["capacity"] == 18
+
+
+def test_sync_rooms_filters_gunsan(monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+    from domains.schedule_management import rooms_sync as rs
+
+    stored: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        rs,
+        "get_room_calendar_config",
+        lambda: {
+            "group_calendar_id": "",
+            "sync_name_filter": "군산",
+            "room_resource_ids": [],
+            "impersonate_email": "",
+        },
+    )
+    monkeypatch.setattr(rs, "upsert_rooms", lambda rooms: stored.extend(rooms))
+    monkeypatch.setattr(
+        rs,
+        "list_calendar_list",
+        lambda **kw: cc.CalendarResult(
+            ok=True,
+            calendar_list_items=[
+                {
+                    "id": "gunsan-1@resource.calendar.google.com",
+                    "summary": "군산 회의실 1",
+                    "description": "",
+                },
+                {
+                    "id": "seoul-1@resource.calendar.google.com",
+                    "summary": "서울 회의실 1",
+                    "description": "",
+                },
+            ],
+        ),
+    )
+
+    count, msg = rs.sync_resource_rooms_from_calendar_list()
+    assert count == 1
+    assert "군산" in stored[0]["name"] or "gunsan" in stored[0]["calendar_resource_id"]
+
+
+def test_create_event_includes_resource_attendee(monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+
+    monkeypatch.setenv("SCHEDULE_DRY_RUN", "false")
+    captured: dict[str, Any] = {}
+
+    def fake_request(**kwargs):
+        captured.update(kwargs)
+        return (
+            {"id": "evt1", "htmlLink": "https://calendar.google.com/event"},
+            None,
+        )
+
+    monkeypatch.setattr(cc, "_request", fake_request)
+    result = cc.create_event(
+        calendar_id="primary",
+        summary="회의",
+        start_iso="2026-05-10T10:00:00+09:00",
+        end_iso="2026-05-10T11:00:00+09:00",
+        attendees=["u@x.com"],
+        resource_emails=["room@resource.calendar.google.com"],
+    )
+    assert result.ok
+    attendees = captured["body"]["attendees"]
+    assert any(a.get("resource") for a in attendees)
+
+
+def test_group_calendar_bookings_match_room():
+    from domains.schedule_management.rooms_group import match_booking_to_room
+
+    rooms = [
+        {"id": "r1", "name": "군산 A", "calendar_resource_id": "a@resource.calendar.google.com"},
+    ]
+    event = {
+        "summary": "팀 회의",
+        "location": "",
+        "attendees": [{"email": "a@resource.calendar.google.com", "resource": True}],
+    }
+    matched = match_booking_to_room(event, rooms)
+    assert matched is not None
+    assert matched["id"] == "r1"
+
+
+def test_confirm_rejects_busy_room(patch_members, monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+    from domains.schedule_management.handler import handle_schedule_management_action
+
+    monkeypatch.setattr(
+        "domains.schedule_management.handler.get_rooms",
+        lambda: [
+            {
+                "id": "room1",
+                "name": "군산 A",
+                "calendar_resource_id": "busy@resource.calendar.google.com",
+                "capacity": 10,
+                "equipment": [],
+                "default_priority": 0,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "domains.schedule_management.handler.freebusy_query",
+        lambda **kw: cc.CalendarResult(
+            ok=True,
+            busy={
+                "busy@resource.calendar.google.com": [
+                    {"start": "2026-05-10T09:00:00+09:00", "end": "2026-05-10T12:00:00+09:00"}
+                ]
+            },
+        ),
+    )
+    monkeypatch.setattr("domains.schedule_management.handler.is_dry_run", lambda: True)
+
+    out = handle_schedule_management_action(
+        invoked_function="sm_compose_confirm",
+        parameters=_full_confirm_params(),
+        form_inputs={
+            "calendar_id": _form("user:u@x.com:primary"),
+            "meeting_date": _form("2026-05-10"),
+            "meeting_time": _form("10:00"),
+            "title": _form("킥오프"),
+        },
+        chat_event={"user": {"email": "u@x.com"}},
+    )
+    assert out["cardsV2"][0]["cardId"] == "sm_compose_full"
+    assert "사용 중" in str(out)

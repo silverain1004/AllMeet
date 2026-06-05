@@ -8,15 +8,16 @@ from typing import Any
 
 from domains.schedule_management.cards import (
     build_compose_card,
-    build_reservation_menu_card,
     build_result_card,
     build_settings_card,
 )
 from domains.schedule_management.calendar_client import (
+    KST,
     calendar_error_message,
     create_event,
     delete_event,
     extract_meet_link,
+    freebusy_query,
     is_dry_run,
     patch_event,
     to_kst_iso,
@@ -36,7 +37,12 @@ from domains.schedule_management.oauth_calendar import (
     list_user_calendars,
 )
 from domains.schedule_management.reservations_store import save_reservation
-from domains.schedule_management.rooms import recommend_rooms
+from domains.schedule_management.room_calendar_store import (
+    get_room_calendar_config,
+    update_room_calendar_config,
+)
+from domains.schedule_management.rooms import get_group_booking_summary, recommend_rooms
+from domains.schedule_management.rooms_store import get_rooms
 from domains.schedule_management.rooms_sync import sync_resource_rooms_from_calendar_list
 from domains.weekly_meeting.oauth_callback import build_authorization_url, encode_state
 from firestore.team_config import (
@@ -158,6 +164,52 @@ def _find_member_matches(query: str, members: list[dict[str, Any]]) -> list[dict
     return matches
 
 
+def _room_by_id(room_id: str) -> dict[str, Any] | None:
+    rid = (room_id or "").strip()
+    if not rid:
+        return None
+    for room in get_rooms():
+        if str(room.get("id") or "").strip() == rid:
+            return room
+    return None
+
+
+def _is_room_busy(
+    resource_id: str,
+    *,
+    start_iso: str,
+    end_iso: str,
+    access_token: str | None,
+) -> bool:
+    if not resource_id:
+        return False
+    result = freebusy_query(
+        calendar_ids=[resource_id],
+        time_min=start_iso,
+        time_max=end_iso,
+        access_token=access_token,
+    )
+    if not result.ok:
+        return False
+    busy_list = result.busy.get(resource_id) or []
+    try:
+        t0 = datetime.fromisoformat(start_iso).astimezone(KST)
+        t1 = datetime.fromisoformat(end_iso).astimezone(KST)
+    except ValueError:
+        return False
+    for span in busy_list:
+        s_raw = (span.get("start") or "").replace("Z", "+00:00")
+        e_raw = (span.get("end") or "").replace("Z", "+00:00")
+        try:
+            s = datetime.fromisoformat(s_raw).astimezone(KST)
+            e = datetime.fromisoformat(e_raw).astimezone(KST)
+        except ValueError:
+            continue
+        if s < t1 and e > t0:
+            return True
+    return False
+
+
 def _ensure_calendar_id(state: dict[str, Any], chat_event: dict[str, Any] | None) -> None:
     if state.get("calendar_id"):
         return
@@ -179,12 +231,14 @@ def _render_compose(
     _ensure_calendar_id(state, chat_event)
     apply_duration_mode(state)
     api_cal, token = _resolve_calendar_auth(str(state.get("calendar_id") or ""), chat_event)
+    access = token or (get_user_access_token(email) if email else None)
     rooms = recommend_rooms(
         state,
         max_n=3,
         duration_minutes=int(state.get("duration_minutes") or 60),
-        access_token=token or (get_user_access_token(email) if email else None),
+        access_token=access,
     )
+    group_summary = get_group_booking_summary(state, access_token=access)
     linked = bool(email and is_oauth_linked(email))
     return build_compose_card(
         state,
@@ -194,6 +248,7 @@ def _render_compose(
         pending_candidates=pending_candidates,
         oauth_linked=linked,
         oauth_url=_oauth_url(chat_event),
+        group_booking_summary=group_summary,
         include_action_response=include_action_response,
     )
 
@@ -233,7 +288,9 @@ def _validate_time_state(state: dict[str, Any]) -> list[str]:
         errors.append("날짜를 선택해 주세요.")
     if not state.get("meeting_time"):
         errors.append("시작 시간을 선택해 주세요.")
-    mode = str(state.get("duration_mode") or "1h")
+    mode = str(state.get("duration_mode") or "").strip()
+    if not mode:
+        errors.append("회의 시간(1시간/2시간/직접입력)을 선택해 주세요.")
     if mode == "custom":
         end = str(state.get("meeting_end_time") or "").strip()
         if not end:
@@ -278,10 +335,16 @@ def handle_schedule_management_action(
     members = get_all_members()
 
     if invoked_function == "sm_open_menu":
-        return build_reservation_menu_card(include_action_response=True)
+        from domains.daily_chat.home_menu import build_home_menu_card
+
+        return build_home_menu_card(chat_event=chat_event, include_action_response=True)
 
     if invoked_function == "sm_open_settings":
-        return build_settings_card(get_team_list(), include_action_response=True)
+        return build_settings_card(
+            get_team_list(),
+            room_calendar_config=get_room_calendar_config(),
+            include_action_response=True,
+        )
 
     if invoked_function == "sm_sync_rooms":
         count, msg = sync_resource_rooms_from_calendar_list()
@@ -311,6 +374,22 @@ def handle_schedule_management_action(
         return {
             "actionResponse": {"type": "UPDATE_MESSAGE"},
             "text": f"✅ {team_name} 팀 캘린더 ID 저장: {calendar_id}",
+        }
+
+    if invoked_function == "sm_settings_save_room_calendar":
+        group_calendar_id = _safe_form_value(form_inputs, "group_calendar_id")
+        room_resource_ids = _safe_form_value(form_inputs, "room_resource_ids")
+        impersonate_email = _safe_form_value(form_inputs, "impersonate_email")
+        sync_name_filter = _safe_form_value(form_inputs, "sync_name_filter") or "군산"
+        update_room_calendar_config(
+            group_calendar_id=group_calendar_id,
+            room_resource_ids=room_resource_ids,
+            impersonate_email=impersonate_email,
+            sync_name_filter=sync_name_filter,
+        )
+        return {
+            "actionResponse": {"type": "UPDATE_MESSAGE"},
+            "text": "✅ 군산 회의실 캘린더 설정을 저장했습니다.",
         }
 
     if invoked_function == "sm_open_compose":
@@ -396,8 +475,13 @@ def handle_schedule_management_action(
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_pick_room":
+        state["compose_step"] = "quick"
         state["picked_room_id"] = parameters.get("picked_room_id", "")
         state["picked_room_name"] = parameters.get("picked_room_name", "")
+        errors = _validate_time_state(state)
+        if errors:
+            state["errors"] = errors
+            return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
         state["compose_step"] = "full"
         state["errors"] = []
         _ensure_calendar_id(state, chat_event)
@@ -436,6 +520,19 @@ def handle_schedule_management_action(
             if str(a.get("email") or "").strip()
         ]
         location = str(state.get("picked_room_name") or "").strip()
+        picked_room = _room_by_id(str(state.get("picked_room_id") or ""))
+        resource_id = str((picked_room or {}).get("calendar_resource_id") or "").strip()
+        resource_emails = [resource_id] if resource_id else None
+
+        if resource_id and _is_room_busy(
+            resource_id,
+            start_iso=start_iso,
+            end_iso=end_iso,
+            access_token=access_token,
+        ):
+            state["errors"] = ["선택한 회의실이 해당 시간에 이미 사용 중입니다. 다른 회의실을 선택해 주세요."]
+            return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
+
         want_meet = bool(state.get("want_meet") or state.get("auto_meet"))
         existing_event_id = str(state.get("last_event_id") or "").strip()
         existing_api_cal = str(state.get("last_api_calendar_id") or "").strip()
@@ -448,6 +545,8 @@ def handle_schedule_management_action(
                 start_iso=start_iso,
                 end_iso=end_iso,
                 location=location,
+                attendees=attendee_emails,
+                resource_emails=resource_emails,
                 access_token=access_token,
             )
         else:
@@ -457,6 +556,7 @@ def handle_schedule_management_action(
                 start_iso=start_iso,
                 end_iso=end_iso,
                 attendees=attendee_emails,
+                resource_emails=resource_emails,
                 location=location,
                 description="AllMeet 예약",
                 add_google_meet=want_meet,
@@ -491,7 +591,7 @@ def handle_schedule_management_action(
         )
         ac = state.get("attendee_count")
         if ac:
-            lines.append(f"참석 인원: {ac}명")
+            lines.append(f"참석 인원: {ac}+")
         if attendee_emails:
             lines.append(f"참석자: {', '.join(attendee_emails)}")
         if meet_link:

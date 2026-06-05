@@ -11,7 +11,36 @@ from domains.schedule_management.calendar_client import (
     freebusy_query,
     to_kst_iso,
 )
+from domains.schedule_management.room_calendar_store import get_room_calendar_config
+from domains.schedule_management.rooms_group import (
+    busy_resource_ids_from_group_bookings,
+    format_group_booking_summary,
+    list_group_room_bookings,
+)
 from domains.schedule_management.rooms_store import get_rooms
+
+_AVAILABILITY_PREVIEW_MINUTES = 60
+
+
+def _availability_duration_minutes(state: dict[str, Any], duration_minutes: int) -> int:
+    """가용성 조회용 회의 길이(분). duration 미선택 시 1시간으로 미리보기."""
+    mode = str(state.get("duration_mode") or "").strip()
+    if mode == "1h":
+        return 60
+    if mode == "2h":
+        return 120
+    if mode == "custom":
+        dm = int(state.get("duration_minutes") or duration_minutes or 0)
+        return dm if dm > 0 else _AVAILABILITY_PREVIEW_MINUTES
+    if duration_minutes > 0:
+        return duration_minutes
+    dm = int(state.get("duration_minutes") or 0)
+    return dm if dm > 0 else _AVAILABILITY_PREVIEW_MINUTES
+
+
+def _room_equipment_line(room: dict[str, Any]) -> str:
+    equipment = [str(x).strip() for x in (room.get("equipment") or []) if str(x).strip()]
+    return ", ".join(equipment) if equipment else "장비 정보 없음"
 
 
 def score_rooms(
@@ -183,16 +212,31 @@ def recommend_rooms(
         name_keyword=name_keyword,
     )
     ordered = [r for r, _ in scored]
+    if explicit is not None:
+        ordered = [
+            r
+            for r in ordered
+            if int(r.get("capacity") or 0) >= attendee_count or int(r.get("capacity") or 0) == 0
+        ]
 
     date = str(state.get("meeting_date") or "").strip()
     time_str = str(state.get("meeting_time") or "").strip()
-    if date and time_str:
+    duration_mode = str(state.get("duration_mode") or "").strip()
+    eff_duration = _availability_duration_minutes(state, duration_minutes)
+    can_check = bool(date and time_str)
+    if duration_mode == "custom":
+        can_check = can_check and bool(str(state.get("meeting_end_time") or "").strip())
+    if can_check:
         try:
             start_iso = to_kst_iso(date, time_str)
-            end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
-                minutes=duration_minutes
-            )
-            end_iso = end_dt.replace(tzinfo=KST).isoformat()
+            if duration_mode == "custom":
+                end_time = str(state.get("meeting_end_time") or "").strip()
+                end_iso = to_kst_iso(date, end_time)
+            else:
+                end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
+                    minutes=eff_duration
+                )
+                end_iso = end_dt.replace(tzinfo=KST).isoformat()
             annotated: list[dict[str, Any]] = []
             resource_ids = [
                 str(r.get("calendar_resource_id") or "").strip()
@@ -233,6 +277,20 @@ def recommend_rooms(
                 )
                 if fb.ok:
                     busy_map = fb.busy
+            group_busy: set[str] = set()
+            group_bookings: list[dict[str, Any]] = []
+            if get_room_calendar_config().get("group_calendar_id"):
+                group_bookings = list_group_room_bookings(
+                    time_min=start_iso,
+                    time_max=end_iso,
+                    access_token=access_token,
+                )
+                group_busy = busy_resource_ids_from_group_bookings(
+                    group_bookings,
+                    ordered,
+                    time_min_iso=start_iso,
+                    time_max_iso=end_iso,
+                )
             t0 = datetime.fromisoformat(start_iso).astimezone(KST)
             t1 = datetime.fromisoformat(end_iso).astimezone(KST)
 
@@ -252,56 +310,70 @@ def recommend_rooms(
             for room in ordered:
                 row = dict(room)
                 rid = str(room.get("calendar_resource_id") or "").strip()
-                if attendee_busy:
-                    row["availability"] = "attendee_conflict"
-                elif not rid:
+                if not rid:
                     row["availability"] = "unknown"
-                elif _busy_at(rid):
+                elif _busy_at(rid) or rid in group_busy:
                     row["availability"] = "busy"
                 else:
                     row["availability"] = "free"
-                if partial_attendee_check:
-                    row["attendee_check"] = "partial"
+                row["show_availability"] = True
                 annotated.append(row)
             annotated.sort(
-                key=lambda r: {
-                    "free": 0,
-                    "unknown": 1,
-                    "attendee_conflict": 2,
-                    "busy": 3,
-                }.get(str(r.get("availability")), 1)
+                key=lambda r: {"free": 0, "busy": 1}.get(str(r.get("availability")), 0)
             )
             ordered = annotated
         except ValueError:
             pass
 
-    meeting_when = ""
-    if date and time_str:
-        try:
-            d = datetime.strptime(date, "%Y-%m-%d")
-            meeting_when = f"{d.year}년 {d.month:02d}월 {d.day:02d}일 {time_str}"
-        except ValueError:
-            meeting_when = f"{date} {time_str}"
-
     out: list[dict[str, Any]] = []
     for room in ordered[:max_n]:
         row = dict(room)
-        row["display_when"] = meeting_when
-        equip = ", ".join(room.get("equipment") or [])
-        row["display_line"] = (
-            f"{room.get('name','')} | {meeting_when or '일시 미정'} | "
-            f"수용 {room.get('capacity',0)}명 | {equip or '장비 정보 없음'}"
-        )
-        avail = row.get("availability", "unknown")
-        if avail == "free":
-            row["availability_label"] = "예약 가능"
-        elif avail == "busy":
-            row["availability_label"] = "회의실 사용 중"
-        elif avail == "attendee_conflict":
-            row["availability_label"] = "참석자 일정 충돌"
-        elif row.get("attendee_check") == "partial":
-            row["availability_label"] = "일부 참석자 일정 미확인"
+        row["display_line"] = f"수용 {room.get('capacity', 0)}명 | {_room_equipment_line(room)}"
+        if row.get("show_availability"):
+            avail = str(row.get("availability") or "")
+            if avail == "busy":
+                row["availability_label"] = "사용 중"
+            elif avail == "free":
+                row["availability_label"] = "사용 가능"
+            else:
+                row["availability_label"] = ""
+                row["show_availability"] = False
         else:
-            row["availability_label"] = "가용성 미확인"
+            row["availability_label"] = ""
+            row["show_availability"] = False
         out.append(row)
     return out
+
+
+def get_group_booking_summary(
+    state: dict[str, Any],
+    *,
+    access_token: str | None = None,
+) -> str:
+    """선택 일시 기준 군산 집계 캘린더 예약 요약."""
+    date = str(state.get("meeting_date") or "").strip()
+    time_str = str(state.get("meeting_time") or "").strip()
+    if not date or not time_str or not get_room_calendar_config().get("group_calendar_id"):
+        return ""
+    try:
+        duration = int(state.get("duration_minutes") or 60)
+        start_iso = to_kst_iso(date, time_str)
+        end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
+            minutes=duration
+        )
+        end_iso = end_dt.replace(tzinfo=KST).isoformat()
+    except ValueError:
+        return ""
+    bookings = list_group_room_bookings(
+        time_min=start_iso,
+        time_max=end_iso,
+        access_token=access_token,
+    )
+    if not bookings:
+        return ""
+    return format_group_booking_summary(
+        bookings,
+        get_rooms(),
+        time_min_iso=start_iso,
+        time_max_iso=end_iso,
+    )
