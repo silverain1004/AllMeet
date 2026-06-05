@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Any
 
-from config.settings import LOCATION, PROJECT_ID
+from config.settings import ALLMEET_CHAT_MODEL, LOCATION, PROJECT_ID
 
 from . import conversation_store as conv
 
@@ -103,7 +103,7 @@ def _answer_with_google_search(user_message: str, ctx_block: str = "") -> str:
         os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
-        model_name = os.environ.get("ALLMEET_CHAT_MODEL", "gemini-2.0-flash-001")
+        model_name = ALLMEET_CHAT_MODEL
         client = genai.Client()
         intro = (
             "당신은 All-Meet 업무 에이전트입니다. 아래 질문에 대해 검색 결과를 바탕으로 "
@@ -176,7 +176,7 @@ def _get_generative_model():
         max_output_tokens=1024,
     )
     _model = GenerativeModel(
-        os.environ.get("ALLMEET_CHAT_MODEL", "gemini-2.0-flash-001"),
+        ALLMEET_CHAT_MODEL,
         generation_config=gen_cfg,
     )
     return _model
