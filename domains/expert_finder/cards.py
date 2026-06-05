@@ -122,13 +122,14 @@ def build_result_card(
     # 2·3위 — 작게.
     others = top3[1:]
     if others:
-        body = "<br><br>".join(
-            _render_expert_block(e, member_pool, rank=i + 2, reasons=reasons)
-            for i, e in enumerate(others)
-        )
+        widgets: list[dict[str, Any]] = []
+        for i, e in enumerate(others):
+            if i > 0:
+                widgets.append({"divider": {}})
+            widgets.append({"textParagraph": {"text": _render_expert_block(e, member_pool, rank=i + 2, reasons=reasons)}})
         sections.append({
             "header": "그 외 후보",
-            "widgets": [{"textParagraph": {"text": body}}],
+            "widgets": widgets,
         })
 
     # 푸터 — 같은 section 마지막 widget 으로 (sections 분리하면 chat 이 silently drop 한 사례 회피).
