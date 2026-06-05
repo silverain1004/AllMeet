@@ -15,6 +15,10 @@ def empty_compose_state() -> dict[str, Any]:
         "calendar_id": "",
         "meeting_date": "",
         "meeting_time": "",
+        "meeting_end_time": "",
+        "duration_mode": "1h",
+        "compose_step": "quick",
+        "attendee_count": None,
         "title": "",
         "attendees": [],
         "meet_url": "",
@@ -61,7 +65,15 @@ def deserialize_attendees(pipe: str) -> list[dict[str, str]]:
 
 
 def state_to_button_params(state: dict[str, Any]) -> dict[str, str]:
+    ac = state.get("attendee_count")
     return {
+        "compose_step": str(state.get("compose_step") or "quick"),
+        "duration_mode": str(state.get("duration_mode") or "1h"),
+        "meeting_date": str(state.get("meeting_date") or ""),
+        "meeting_time": str(state.get("meeting_time") or ""),
+        "meeting_end_time": str(state.get("meeting_end_time") or ""),
+        "attendee_count": str(ac) if ac is not None else "",
+        "calendar_id": str(state.get("calendar_id") or ""),
         "attendees_pipe": serialize_attendees(state.get("attendees") or []),
         "meet_url": str(state.get("meet_url") or ""),
         "want_meet": "1" if state.get("want_meet") or state.get("auto_meet") else "",
@@ -112,6 +124,21 @@ def compose_state_from(
     state["meeting_time"] = _safe_form_value(form_inputs, "meeting_time") or parameters.get(
         "meeting_time", ""
     )
+    state["meeting_end_time"] = _safe_form_value(form_inputs, "meeting_end_time") or parameters.get(
+        "meeting_end_time", ""
+    )
+    state["duration_mode"] = (
+        _safe_form_value(form_inputs, "duration_mode")
+        or parameters.get("duration_mode", "")
+        or "1h"
+    )
+    state["compose_step"] = parameters.get("compose_step", "") or "quick"
+    ac_raw = _safe_form_value(form_inputs, "attendee_count") or parameters.get("attendee_count", "")
+    if ac_raw:
+        try:
+            state["attendee_count"] = max(int(ac_raw), 1)
+        except ValueError:
+            state["attendee_count"] = None
     state["title"] = _safe_form_value(form_inputs, "title") or parameters.get("title", "")
     state["meet_url"] = parameters.get("meet_url", state.get("meet_url", ""))
     state["want_meet"] = parameters.get("want_meet", "") in ("1", "true", "yes")
@@ -131,7 +158,48 @@ def compose_state_from(
         state["duration_minutes"] = int(parameters.get("duration_minutes") or 60)
     except ValueError:
         state["duration_minutes"] = 60
+    apply_duration_mode(state)
     return state
+
+
+def apply_duration_mode(state: dict[str, Any]) -> None:
+    """duration_mode에 따라 duration_minutes를 동기화."""
+    mode = str(state.get("duration_mode") or "1h")
+    if mode == "1h":
+        state["duration_minutes"] = 60
+    elif mode == "2h":
+        state["duration_minutes"] = 120
+    elif mode == "custom":
+        date = str(state.get("meeting_date") or "").strip()
+        start = str(state.get("meeting_time") or "").strip()
+        end = str(state.get("meeting_end_time") or "").strip()
+        if date and start and end:
+            try:
+                start_dt = datetime.strptime(f"{date} {start}", "%Y-%m-%d %H:%M")
+                end_dt = datetime.strptime(f"{date} {end}", "%Y-%m-%d %H:%M")
+                diff = int((end_dt - start_dt).total_seconds() / 60)
+                if diff > 0:
+                    state["duration_minutes"] = diff
+            except ValueError:
+                pass
+
+
+def resolve_end_time(state: dict[str, Any]) -> str:
+    """표시·예약용 종료 시각(HH:MM)."""
+    mode = str(state.get("duration_mode") or "1h")
+    date = str(state.get("meeting_date") or "").strip()
+    start = str(state.get("meeting_time") or "").strip()
+    if mode == "custom":
+        return str(state.get("meeting_end_time") or "").strip()
+    if not date or not start:
+        return ""
+    duration = int(state.get("duration_minutes") or 60)
+    try:
+        start_dt = datetime.strptime(f"{date} {start}", "%Y-%m-%d %H:%M")
+        end_dt = start_dt + timedelta(minutes=max(duration, 10))
+        return end_dt.strftime("%H:%M")
+    except ValueError:
+        return ""
 
 
 def format_date_korean(date_str: str) -> str:

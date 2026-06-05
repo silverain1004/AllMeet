@@ -1,4 +1,4 @@
-"""캘린더 예약 핸들러 (compose 카드 v2 + Phase 2+)."""
+"""캘린더 예약 핸들러 (compose 카드 v2, 2단계)."""
 
 from __future__ import annotations
 
@@ -22,8 +22,10 @@ from domains.schedule_management.calendar_client import (
     to_kst_iso,
 )
 from domains.schedule_management.compose_state import (
+    apply_duration_mode,
     compose_state_from,
     empty_compose_state,
+    resolve_end_time,
     state_to_button_params,
 )
 from domains.schedule_management.conversation import extract_compose_state_with_llm_fallback
@@ -46,6 +48,7 @@ from firestore.team_config import (
 )
 
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+_SUGGESTION_RE = re.compile(r"^(.+?)\s*\(([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\)\s*$")
 
 
 def _safe_team_id(form_inputs: dict[str, Any]) -> str:
@@ -113,8 +116,26 @@ def _is_email(text: str) -> bool:
     return bool(_EMAIL_RE.match((text or "").strip()))
 
 
+def _parse_attendee_raw(raw: str) -> tuple[str, str]:
+    """suggestion '이름 (email)' 또는 이메일/이름 문자열 파싱."""
+    text = (raw or "").strip()
+    m = _SUGGESTION_RE.match(text)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    if _is_email(text):
+        return "", text
+    return text, ""
+
+
 def _find_member_matches(query: str, members: list[dict[str, Any]]) -> list[dict[str, str]]:
-    q = (query or "").strip()
+    name_hint, email_hint = _parse_attendee_raw(query)
+    if email_hint:
+        for m in members:
+            if str(m.get("email") or "").strip().lower() == email_hint.lower():
+                return [{"name": str(m.get("name") or "").strip(), "email": email_hint}]
+        return [{"name": name_hint, "email": email_hint}]
+
+    q = name_hint or (query or "").strip()
     if not q:
         return []
     q_lower = q.lower()
@@ -131,7 +152,18 @@ def _find_member_matches(query: str, members: list[dict[str, Any]]) -> list[dict
                     matches.append({"name": name, "email": email})
                     seen.add(email)
                 break
+        if email and (q_lower in email.lower()) and email not in seen:
+            matches.append({"name": name, "email": email})
+            seen.add(email)
     return matches
+
+
+def _ensure_calendar_id(state: dict[str, Any], chat_event: dict[str, Any] | None) -> None:
+    if state.get("calendar_id"):
+        return
+    opts = _calendar_options(chat_event)
+    if opts:
+        state["calendar_id"] = opts[0]["id"]
 
 
 def _render_compose(
@@ -140,9 +172,12 @@ def _render_compose(
     chat_event: dict[str, Any] | None = None,
     pending_candidates: list[dict[str, str]] | None = None,
     include_action_response: bool = False,
+    members: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     ctx = _user_context(chat_event)
     email = ctx.get("email", "")
+    _ensure_calendar_id(state, chat_event)
+    apply_duration_mode(state)
     api_cal, token = _resolve_calendar_auth(str(state.get("calendar_id") or ""), chat_event)
     rooms = recommend_rooms(
         state,
@@ -155,6 +190,7 @@ def _render_compose(
         state,
         calendar_options=_calendar_options(chat_event),
         recommended_rooms=rooms,
+        members=members if members is not None else get_all_members(),
         pending_candidates=pending_candidates,
         oauth_linked=linked,
         oauth_url=_oauth_url(chat_event),
@@ -183,13 +219,35 @@ def _merge_extracted_state(base: dict[str, Any], extracted: dict[str, Any]) -> d
         out["want_meet"] = True
     if extracted.get("duration_minutes") and not out.get("duration_minutes"):
         out["duration_minutes"] = extracted["duration_minutes"]
+        dm = extracted["duration_minutes"]
+        if dm == 120:
+            out["duration_mode"] = "2h"
+        elif dm != 60:
+            out["duration_mode"] = "custom"
     return out
 
 
-def _end_time_from_start(date: str, start_time: str, duration_minutes: int) -> str:
-    start_dt = datetime.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M")
-    end_dt = start_dt + timedelta(minutes=max(duration_minutes, 10))
-    return end_dt.strftime("%H:%M")
+def _validate_time_state(state: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not state.get("meeting_date"):
+        errors.append("날짜를 선택해 주세요.")
+    if not state.get("meeting_time"):
+        errors.append("시작 시간을 선택해 주세요.")
+    mode = str(state.get("duration_mode") or "1h")
+    if mode == "custom":
+        end = str(state.get("meeting_end_time") or "").strip()
+        if not end:
+            errors.append("종료 시간을 선택해 주세요.")
+        else:
+            try:
+                date = str(state["meeting_date"])
+                start_dt = datetime.strptime(f"{date} {state['meeting_time']}", "%Y-%m-%d %H:%M")
+                end_dt = datetime.strptime(f"{date} {end}", "%Y-%m-%d %H:%M")
+                if end_dt <= start_dt:
+                    errors.append("종료 시간은 시작 시간보다 뒤여야 합니다.")
+            except ValueError:
+                errors.append("시간 형식이 올바르지 않습니다.")
+    return errors
 
 
 def handle_schedule_management(
@@ -199,11 +257,10 @@ def handle_schedule_management(
     members = get_all_members()
     extracted = extract_compose_state_with_llm_fallback(user_message, members=members)
     state = _merge_extracted_state(empty_compose_state(), extracted)
-    opts = _calendar_options(chat_event)
-    if not state.get("calendar_id") and opts:
-        state["calendar_id"] = opts[0]["id"]
-    out = _render_compose(state, chat_event=chat_event)
-    out["text"] = "회의 예약 화면입니다. 항목을 확인한 뒤 확정해 주세요."
+    state["compose_step"] = "quick"
+    _ensure_calendar_id(state, chat_event)
+    out = _render_compose(state, chat_event=chat_event, members=members)
+    out["text"] = "간편 예약 화면입니다."
     return out
 
 
@@ -258,23 +315,37 @@ def handle_schedule_management_action(
 
     if invoked_function == "sm_open_compose":
         state = compose_state_from(parameters, form_inputs)
-        return _render_compose(state, chat_event=chat_event, include_action_response=True)
+        if not state.get("compose_step"):
+            state["compose_step"] = "quick"
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     state = compose_state_from(parameters, form_inputs)
     pending: list[dict[str, str]] | None = None
 
-    if invoked_function == "sm_compose_refresh":
-        return _render_compose(state, chat_event=chat_event, include_action_response=True)
+    if invoked_function in ("sm_compose_refresh", "sm_compose_quick_update"):
+        state["compose_step"] = "quick"
+        state["errors"] = []
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
+
+    if invoked_function == "sm_compose_back_quick":
+        state["compose_step"] = "quick"
+        state["errors"] = []
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_add_attendee":
+        state["compose_step"] = "full"
         raw = _safe_form_value(form_inputs, "attendee_input")
         state["errors"] = []
         if not raw:
             state["errors"] = ["참석자 이름 또는 이메일을 입력해 주세요."]
-            return _render_compose(state, chat_event=chat_event, include_action_response=True)
-        if _is_email(raw):
-            if not any(a.get("email") == raw for a in state.get("attendees") or []):
-                state.setdefault("attendees", []).append({"name": "", "email": raw})
+            return _render_compose(
+                state, chat_event=chat_event, include_action_response=True, members=members
+            )
+        name_hint, email_hint = _parse_attendee_raw(raw)
+        if email_hint:
+            entry = {"name": name_hint, "email": email_hint}
+            if not any(a.get("email") == email_hint for a in state.get("attendees") or []):
+                state.setdefault("attendees", []).append(entry)
         else:
             matches = _find_member_matches(raw, members)
             if len(matches) == 1:
@@ -286,17 +357,23 @@ def handle_schedule_management_action(
             else:
                 state["errors"] = ["등록된 이름이 없습니다. 이메일 형식으로 입력해 주세요."]
         return _render_compose(
-            state, chat_event=chat_event, pending_candidates=pending, include_action_response=True
+            state,
+            chat_event=chat_event,
+            pending_candidates=pending,
+            include_action_response=True,
+            members=members,
         )
 
     if invoked_function == "sm_compose_pick_attendee":
+        state["compose_step"] = "full"
         email = parameters.get("pick_email", "").strip()
         name = parameters.get("pick_name", "").strip()
         if email and not any(a.get("email") == email for a in state.get("attendees") or []):
             state.setdefault("attendees", []).append({"name": name, "email": email})
-        return _render_compose(state, chat_event=chat_event, include_action_response=True)
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_remove_attendee":
+        state["compose_step"] = "full"
         try:
             idx = int(parameters.get("remove_index", "-1"))
         except ValueError:
@@ -305,41 +382,51 @@ def handle_schedule_management_action(
         if 0 <= idx < len(attendees):
             attendees.pop(idx)
             state["attendees"] = attendees
-        return _render_compose(state, chat_event=chat_event, include_action_response=True)
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_create_meet":
+        state["compose_step"] = "full"
         state["want_meet"] = True
-        return _render_compose(state, chat_event=chat_event, include_action_response=True)
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_remove_meet":
+        state["compose_step"] = "full"
         state["want_meet"] = False
         state["meet_url"] = ""
-        return _render_compose(state, chat_event=chat_event, include_action_response=True)
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_pick_room":
         state["picked_room_id"] = parameters.get("picked_room_id", "")
         state["picked_room_name"] = parameters.get("picked_room_name", "")
-        return _render_compose(state, chat_event=chat_event, include_action_response=True)
+        state["compose_step"] = "full"
+        state["errors"] = []
+        _ensure_calendar_id(state, chat_event)
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_confirm":
+        state["compose_step"] = "full"
         errors: list[str] = []
+        if str(state.get("compose_step") or "") != "full":
+            errors.append("회의실을 선택한 뒤 본 예약에서 확정해 주세요.")
+        if not state.get("picked_room_id"):
+            errors.append("회의실을 선택해 주세요.")
         if not state.get("calendar_id"):
             errors.append("캘린더를 선택해 주세요.")
-        if not state.get("meeting_date"):
-            errors.append("날짜를 선택해 주세요.")
-        if not state.get("meeting_time"):
-            errors.append("시간을 선택해 주세요.")
+        errors.extend(_validate_time_state(state))
         if not state.get("title"):
             errors.append("제목을 입력해 주세요.")
         if errors:
             state["errors"] = errors
-            return _render_compose(state, chat_event=chat_event, include_action_response=True)
+            return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
         api_cal, access_token = _resolve_calendar_auth(str(state["calendar_id"]), chat_event)
+        apply_duration_mode(state)
         duration = int(state.get("duration_minutes") or 60)
-        end_time = _end_time_from_start(
-            str(state["meeting_date"]), str(state["meeting_time"]), duration
-        )
+        end_time = resolve_end_time(state)
+        if not end_time:
+            end_time = _end_time_from_start(
+                str(state["meeting_date"]), str(state["meeting_time"]), duration
+            )
         start_iso = to_kst_iso(str(state["meeting_date"]), str(state["meeting_time"]))
         end_iso = to_kst_iso(str(state["meeting_date"]), end_time)
 
@@ -402,6 +489,9 @@ def handle_schedule_management_action(
                 f"일시: {state.get('meeting_date')} {state.get('meeting_time')} ~ {end_time}",
             ]
         )
+        ac = state.get("attendee_count")
+        if ac:
+            lines.append(f"참석 인원: {ac}명")
         if attendee_emails:
             lines.append(f"참석자: {', '.join(attendee_emails)}")
         if meet_link:
@@ -472,3 +562,9 @@ def handle_schedule_management_action(
         lines=[f"액션: {invoked_function}"],
         include_action_response=True,
     )
+
+
+def _end_time_from_start(date: str, start_time: str, duration_minutes: int) -> str:
+    start_dt = datetime.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M")
+    end_dt = start_dt + timedelta(minutes=max(duration_minutes, 10))
+    return end_dt.strftime("%H:%M")
