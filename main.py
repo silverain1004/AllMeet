@@ -33,6 +33,14 @@ from domains.weekly_report import handle_weekly_report_draft
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Vertex AI 모델을 앱 시작 시 미리 초기화 (첫 요청 지연 방지)
+try:
+    from domains.daily_chat.chat import _get_generative_model
+    _get_generative_model()
+    logger.info("Vertex AI 모델 사전 초기화 완료")
+except Exception as _e:
+    logger.warning("Vertex AI 모델 사전 초기화 실패 (첫 요청 시 재시도): %s", _e)
+
 
 # ---------------------------------------------------------------------------
 # 의도 분류 (진입점 전용) — 키워드·패턴 기준. 나중에 LLM 분류로 바꿀 수 있음.
