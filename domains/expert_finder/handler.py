@@ -62,33 +62,36 @@ def handle_expert_finder(
     if not keyword:
         return build_keyword_missing_card()
 
+    # 검색 요청자 본인 — 결과에서 제외하기 위해 추출 (본인이 본인을 추천받지 않도록).
+    requester_email = str(((chat_event or {}).get("user") or {}).get("email") or "").strip()
+
     space_name = ((chat_event or {}).get("space") or {}).get("name") or ""
     if not space_name:
         # 챗 외 호출 (단순 POST 등) — 동기 처리.
-        return _run_search_sync(keyword)
+        return _run_search_sync(keyword, requester_email)
 
     threading.Thread(
         target=_run_search_background,
-        args=(space_name, keyword),
+        args=(space_name, keyword, requester_email),
         daemon=False,
     ).start()
     return build_in_progress_card(keyword)
 
 
 # 동기 실행 (챗 외 호출용).
-def _run_search_sync(keyword: str) -> dict[str, Any]:
+def _run_search_sync(keyword: str, requester_email: str = "") -> dict[str, Any]:
     try:
-        return _build_result_card(keyword)
+        return _build_result_card(keyword, requester_email)
     except Exception:
         logger.exception("expert_finder sync 실패: keyword=%s", keyword)
         return build_all_failed_card()
 
 
 # 백그라운드 thread.
-def _run_search_background(space_name: str, keyword: str) -> None:
+def _run_search_background(space_name: str, keyword: str, requester_email: str = "") -> None:
     logger.info("expert_finder 검색 시작 space=%s keyword=%s", space_name, keyword)
     try:
-        card = _build_result_card(keyword)
+        card = _build_result_card(keyword, requester_email)
         ok = post_message_to_space(space_name=space_name, payload=card)
         logger.info(
             "expert_finder 검색 완료·push %s keyword=%s",
@@ -101,7 +104,7 @@ def _run_search_background(space_name: str, keyword: str) -> None:
 
 
 # 공통 — 공용 + 개인(점진 확장) + 스코어링 + Vertex 추천 멘트 + 카드 선택.
-def _build_result_card(keyword: str) -> dict[str, Any]:
+def _build_result_card(keyword: str, requester_email: str = "") -> dict[str, Any]:
     sources = build_public_sources()
     public_hits, public_errors = search_public(keyword=keyword, sources=sources)
     consenting = list_consenting_users()
@@ -126,6 +129,7 @@ def _build_result_card(keyword: str) -> dict[str, Any]:
 
     all_hits = list(public_hits) + list(private_hits)
     scored = score_candidates(all_hits)
+    scored = _exclude_requester(scored, requester_email)
     annotate_with_consent(scored, consenting)
 
     if not scored:
@@ -153,6 +157,16 @@ def _build_result_card(keyword: str) -> dict[str, Any]:
         member_pool=sources.get("member_pool") or [],
         draft=draft,
     )
+
+
+# 검색 요청자 본인 제외 — 본인이 본인을 전문가로 추천받는 건 의미 없음.
+def _exclude_requester(
+    scored: list[dict[str, Any]], requester_email: str
+) -> list[dict[str, Any]]:
+    me = (requester_email or "").strip().lower()
+    if not me:
+        return scored
+    return [s for s in scored if (s.get("email") or "").strip().lower() != me]
 
 
 # 점진 확장 — _WINDOWS 순회. 매칭 동의자 수 ≥ 임계값이면 그 윈도우에서 멈춤.
