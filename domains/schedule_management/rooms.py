@@ -163,7 +163,14 @@ def recommend_rooms(
 ) -> list[dict[str, Any]]:
     rooms = get_rooms()
     attendees = state.get("attendees") or []
-    attendee_count = max(len(attendees), 1)
+    explicit = state.get("attendee_count")
+    if explicit is not None:
+        try:
+            attendee_count = max(int(explicit), 1)
+        except (TypeError, ValueError):
+            attendee_count = max(len(attendees), 1)
+    else:
+        attendee_count = max(len(attendees), 1)
     equipment_keywords = state.get("equipment_keywords") or []
     location_keyword = str(state.get("location_keyword") or "")
     name_keyword = str(state.get("room_name_keyword") or "")
