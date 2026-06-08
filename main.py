@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from enum import Enum
 from typing import Any
 
@@ -30,7 +31,31 @@ from domains.schedule_management import (
 from domains.weekly_meeting import handle_weekly_meeting, handle_weekly_meeting_action
 from domains.weekly_report import handle_weekly_report_draft
 
-logging.basicConfig(level=logging.INFO)
+import json as _json
+
+
+class _JsonFormatter(logging.Formatter):
+    """Cloud Logging 구조화 로그 포맷 (severity 필드 포함)."""
+
+    _LEVEL_MAP = {
+        logging.DEBUG: "DEBUG",
+        logging.INFO: "INFO",
+        logging.WARNING: "WARNING",
+        logging.ERROR: "ERROR",
+        logging.CRITICAL: "CRITICAL",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        return _json.dumps(
+            {"severity": self._LEVEL_MAP.get(record.levelno, "DEFAULT"), "message": msg},
+            ensure_ascii=False,
+        )
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger(__name__)
 
 # Vertex AI 모델을 앱 시작 시 미리 초기화 (첫 요청 지연 방지)
@@ -295,6 +320,40 @@ def hello_http(request):
 
     if request.method != "POST":
         return ("Method Not Allowed", 405, {"Allow": "GET, POST"})
+
+    # ------------------------------------------------------------------
+    # Cloud Scheduler 전용 트리거 — Google Chat 이벤트와 분리
+    # ------------------------------------------------------------------
+    try:
+        path = (request.path or "").rstrip("/")
+    except Exception:
+        path = ""
+
+    if path == "/trigger/weekly-page":
+        body = request.get_json(silent=True) or {}
+        team_id = str(body.get("team_id") or "").strip()
+
+        def _run_safe(tid: str) -> None:
+            try:
+                from domains.weekly_meeting.page_creator import (
+                    run_weekly_page_job,
+                    run_weekly_page_jobs_all,
+                )
+                result = run_weekly_page_job(tid) if tid else run_weekly_page_jobs_all()
+                logger.info("weekly_page_job 완료 [%s]: %s", tid or "all", result)
+            except Exception:
+                logger.exception("weekly_page_job 실패 [%s]", tid or "all")
+
+        threading.Thread(target=_run_safe, args=(team_id,), daemon=True).start()
+        return (
+            json.dumps(
+                {"status": "accepted", "team_id": team_id or "all"},
+                ensure_ascii=False,
+            ),
+            202,
+            {"Content-Type": "application/json; charset=utf-8"},
+        )
+    # ------------------------------------------------------------------
 
     payload = request.get_json(silent=True)
     if payload is None:

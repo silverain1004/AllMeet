@@ -145,6 +145,22 @@ def lookup_member_vacation(
     calendar_id: str = "primary",
 ) -> LookupResult:
     time_min, time_max = _week_range(is_next_week=is_next_week)
+    return lookup_member_vacation_range(
+        member_keywords=member_keywords,
+        time_min=time_min,
+        time_max=time_max,
+        calendar_id=calendar_id,
+    )
+
+
+def lookup_member_vacation_range(
+    *,
+    member_keywords: list[str],
+    time_min: str,
+    time_max: str,
+    calendar_id: str = "primary",
+) -> LookupResult:
+    """지정된 시간 범위 내 팀원 휴가 이벤트 조회."""
     matched: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     vacation_keywords = ("휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation")
@@ -158,6 +174,45 @@ def lookup_member_vacation(
         for event in result.events:
             summary = event.get("summary", "")
             if not _contains_any(summary, vacation_keywords):
+                continue
+            if q.lower() not in summary.lower():
+                continue
+            key = (summary, event.get("start", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            matched.append(event)
+    matched.sort(key=lambda e: e.get("start", ""))
+    return LookupResult(ok=True, events=matched)
+
+
+# 일정 공유 표에 채울 모든 카테고리 키워드 (출장/외근/재택/휴가 포함)
+_ALL_SCHEDULE_KEYWORDS = (
+    "출장", "외근", "재택",
+    "휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation",
+)
+
+
+def lookup_member_schedule_range(
+    *,
+    member_keywords: list[str],
+    time_min: str,
+    time_max: str,
+    calendar_id: str = "primary",
+) -> LookupResult:
+    """지정된 시간 범위 내 팀원 출장/외근/재택/휴가 이벤트 조회."""
+    matched: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for keyword in member_keywords:
+        q = keyword.strip()
+        if not q:
+            continue
+        result = _calendar_list_events(calendar_id=calendar_id, time_min=time_min, time_max=time_max, q=q)
+        if not result.ok:
+            return result
+        for event in result.events:
+            summary = event.get("summary", "")
+            if not _contains_any(summary, _ALL_SCHEDULE_KEYWORDS):
                 continue
             if q.lower() not in summary.lower():
                 continue
