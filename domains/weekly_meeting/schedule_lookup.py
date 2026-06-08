@@ -67,16 +67,17 @@ def _calendar_list_events(
     calendar_id: str,
     time_min: str,
     time_max: str,
-    q: str,
+    q: str = "",
 ) -> LookupResult:
-    params = {
+    params: dict = {
         "timeMin": time_min,
         "timeMax": time_max,
         "singleEvents": "true",
         "orderBy": "startTime",
-        "q": q,
-        "maxResults": "30",
+        "maxResults": "50",
     }
+    if q:
+        params["q"] = q
     encoded = urllib.parse.urlencode(params)
     url = f"https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(calendar_id, safe='')}/events?{encoded}"
     req = urllib.request.Request(url, method="GET")
@@ -184,6 +185,20 @@ def lookup_member_vacation_range(
             matched.append(event)
     matched.sort(key=lambda e: e.get("start", ""))
     return LookupResult(ok=True, events=matched)
+
+
+def fetch_all_calendar_events(
+    *,
+    time_min: str,
+    time_max: str,
+    calendar_id: str = "primary",
+) -> LookupResult:
+    """지정된 시간 범위 내 캘린더 전체 이벤트 조회 (q 필터 없음).
+
+    원본 vacation_fetcher.fetch_calendar_events 와 동일한 방식.
+    '종류(이름)' 형식 이벤트를 로컬에서 파싱하기 위한 전용 함수.
+    """
+    return _calendar_list_events(calendar_id=calendar_id, time_min=time_min, time_max=time_max)
 
 
 # 일정 공유 표에 채울 모든 카테고리 키워드 (출장/외근/재택/휴가 포함)
