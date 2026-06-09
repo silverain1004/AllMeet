@@ -239,11 +239,20 @@ def build_schedule_result_card(title: str, lines: list[str], *, include_action_r
     return _wrap_card("wm_schedule_result", {"title": "AllMeet", "subtitle": "일정 조회 결과"}, widgets, include_action_response=include_action_response)
 
 
-def build_schedule_calendar_id_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:
+def build_schedule_calendar_id_card(
+    teams: list[dict[str, str]],
+    *,
+    include_action_response: bool = False,
+    selected_team_id: str = "",
+    current_calendar_id: str = "",
+    current_vacation_calendar_id: str = "",
+) -> dict[str, Any]:
     widgets = [
         {"textParagraph": {"text": "<b>팀별 캘린더 ID 설정</b><br>Google Calendar의 calendarId를 입력해 주세요. (예: primary 또는 xxx@group.calendar.google.com)"}},
-        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams)}},
-        {"textInput": {"name": "calendar_id", "label": "Calendar ID"}},
+        {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
+        {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_schedule_load_calendar_id"}}}]}},
+        {"textInput": {"name": "calendar_id", "label": "주간회의 Calendar ID", "value": current_calendar_id}},
+        {"textInput": {"name": "vacation_calendar_id", "label": "휴가 Calendar ID (일정 공유 표용, 비우면 위 ID 사용)", "value": current_vacation_calendar_id}},
         {"buttonList": {"buttons": [{"text": "저장", "onClick": {"action": {"function": "wm_schedule_save_calendar_id"}}}]}},
         {"buttonList": {"buttons": [{"text": "일정 조회로 돌아가기", "onClick": {"action": {"function": "wm_open_schedule_menu"}}}]}},
     ]

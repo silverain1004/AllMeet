@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from config.settings import VACATION_CALENDAR_ID
 from api.confluence.client import ConfluenceClient
 from api.confluence.folder import resolve_report_folders
 from api.confluence.previous_report import (
@@ -106,7 +107,8 @@ def _get_member_names(cfg: dict) -> list[str]:
 
 _WEEKDAY_KO = ("월", "화", "수", "목", "금", "토", "일")
 
-# 원본 CATEGORY_MAP 의 AllMeet 버전 (vacation_fetcher.py와 동일 키 사용)
+# 원본 vacation_fetcher.py CATEGORY_MAP 과 동일
+# 리프레시 계열은 vacation 으로 분류 → 일정 공유 표 '휴가' 행에 표시
 _VACATION_CATEGORY_MAP: dict[str, str] = {
     "출장": "business_trip",
     "외근": "field_work",
@@ -144,9 +146,7 @@ _VACATION_CATEGORY_MAP: dict[str, str] = {
 def _parse_vacation_event(summary: str) -> Optional[tuple[str, list[str], str]]:
     """'종류(이름)' 또는 '종류(이름1, 이름2)' 형식 파싱.
 
-    원본 vacation_fetcher._parse_event_title 과 동일한 로직.
-    예: '연차(영은)' → ('vacation', ['영은'], '연차')
-    예: '출장(희민, 성훈)' → ('business_trip', ['희민', '성훈'], '출장')
+    원본 vacation_fetcher._parse_event_title 과 동일.
     """
     if not summary:
         return None
@@ -166,65 +166,153 @@ def _parse_vacation_event(summary: str) -> Optional[tuple[str, list[str], str]]:
     return (cat, names, kind)
 
 
-def _event_name_matches_member(event_name: str, member_name: str) -> bool:
-    """이벤트 추출 이름이 팀원 이름과 일치하는지.
+def _build_team_lookup(
+    team_members_cfg: list,
+) -> tuple[set[str], dict[str, str]]:
+    """Firestore team_members → (valid_ids, nickname_to_name).
 
-    '영은' vs '이영은' 처럼 given name이 full name의 suffix인 경우도 허용.
+    원본 vacation_fetcher._build_team_lookup 과 동일.
+    valid_ids: 정식 이름 + 모든 닉네임 → 이벤트 이름 매칭에 사용.
+    nickname_to_name: 닉네임 → 정식 이름 변환.
     """
-    if not event_name or not member_name:
-        return False
-    return event_name in member_name or member_name in event_name
+    valid_ids: set[str] = set()
+    nickname_to_name: dict[str, str] = {}
+    for m in (team_members_cfg or []):
+        if not isinstance(m, dict):
+            continue
+        name = (m.get("name") or "").strip()
+        if not name:
+            continue
+        valid_ids.add(name)
+        for n in (m.get("nickname") or []):
+            n = (n or "").strip()
+            if n:
+                valid_ids.add(n)
+                nickname_to_name[n] = name
+    return valid_ids, nickname_to_name
 
 
-def _format_vacation_line(kind: str, start: str, member_name: str) -> str:
-    """'MM/DD(요일) 이름(종류)' 포맷 — 원본 vacation_fetcher 출력 형식."""
-    date_str = start[:10] if start else ""
-    if date_str:
-        try:
-            d = datetime.strptime(date_str, "%Y-%m-%d")
-            date_part = f"{d.strftime('%m/%d')}({_WEEKDAY_KO[d.weekday()]})"
-        except ValueError:
-            date_part = date_str
-    else:
-        date_part = ""
-    text = f"{member_name}({kind})"
-    return f"{date_part} {text}" if date_part else text
+def _get_event_dates(event: dict) -> list[str]:
+    """종일 이벤트를 일별 날짜 리스트(YYYY-MM-DD)로 펼침.
+
+    원본 vacation_fetcher._get_event_dates 와 동일.
+    Google Calendar all-day 이벤트는 end 가 마지막 날 +1일(exclusive).
+    """
+    start_str = (event.get("start") or "")[:10]
+    end_str = (event.get("end") or "")[:10]
+    if not start_str:
+        return []
+    try:
+        s = datetime.strptime(start_str, "%Y-%m-%d").date()
+        if end_str and end_str > start_str:
+            e = datetime.strptime(end_str, "%Y-%m-%d").date()
+            result: list[str] = []
+            d = s
+            while d < e:
+                result.append(d.strftime("%Y-%m-%d"))
+                d += timedelta(days=1)
+            return result
+        return [start_str]
+    except ValueError:
+        return [start_str] if start_str else []
+
+
+def _consecutive_day_ranges(sorted_dates: list[str]) -> list[tuple[str, str]]:
+    """연속된 날짜를 (시작, 끝) 쌍 리스트로 병합.
+
+    원본 vacation_fetcher._consecutive_day_ranges 와 동일.
+    """
+    if not sorted_dates:
+        return []
+    ranges: list[tuple[str, str]] = []
+    start = prev = sorted_dates[0]
+    for d in sorted_dates[1:]:
+        prev_d = datetime.strptime(prev, "%Y-%m-%d")
+        cur_d = datetime.strptime(d, "%Y-%m-%d")
+        if (cur_d - prev_d).days == 1:
+            prev = d
+        else:
+            ranges.append((start, prev))
+            start = prev = d
+    ranges.append((start, prev))
+    return ranges
+
+
+def _format_date_range(start: str, end: str) -> str:
+    """'MM/DD(요일)' 또는 'MM/DD-DD(요일-요일)' 포맷.
+
+    원본 vacation_fetcher._format_merged_date_span 출력 형식과 동일.
+    """
+    s_d = datetime.strptime(start, "%Y-%m-%d")
+    e_d = datetime.strptime(end, "%Y-%m-%d")
+    if start == end:
+        return f"{s_d.strftime('%m/%d')}({_WEEKDAY_KO[s_d.weekday()]})"
+    if s_d.month == e_d.month:
+        return (
+            f"{s_d.strftime('%m/%d')}-{e_d.strftime('%d')}"
+            f"({_WEEKDAY_KO[s_d.weekday()]}-{_WEEKDAY_KO[e_d.weekday()]})"
+        )
+    return (
+        f"{s_d.strftime('%m/%d')}-{e_d.strftime('%m/%d')}"
+        f"({_WEEKDAY_KO[s_d.weekday()]}-{_WEEKDAY_KO[e_d.weekday()]})"
+    )
 
 
 def _build_vacation_map(
     member_names: list[str],
     calendar_id: str,
     reference_date: datetime,
+    team_members_cfg: list | None = None,
 ) -> dict[str, dict[str, str]]:
     """reference_date 기준 이번주/다음주 일정 카테고리 맵 빌드.
 
-    원본 vacation_fetcher.get_vacation_template_data 방식:
-    q 없이 전체 이벤트 조회 → '종류(이름)' 파싱 → 팀원 매칭.
-    캘린더 조회 실패 시 빈 dict 반환 (페이지 생성은 계속 진행).
-
-    Returns: {
-        "vacation":      {"this_week": "<ul><li>...</li></ul>", "next_week": "..."},
-        "business_trip": {...},
-        ...
-    }
+    원본 vacation_fetcher.build_vacation_data 방식으로 완전 재구현:
+    - 닉네임 포함 팀원 매칭 (_build_team_lookup)
+    - 종일 이벤트 일별 펼침 (_get_event_dates)
+    - 이번주/다음주 각각 월~금 날짜 범위 체크 (KST 기준)
+    - 연속 날짜 병합 및 범위 포맷 (_format_date_range)
+    - 단일 캘린더 조회로 양쪽 주차 처리
     """
-    if not member_names or not calendar_id:
+    if not calendar_id:
         return {}
     try:
         from domains.weekly_meeting.schedule_lookup import fetch_all_calendar_events
     except ImportError:
         return {}
 
-    norm_members = [normalize_member_name(n) for n in member_names if normalize_member_name(n)]
+    # 닉네임 포함 팀원 lookup 구성
+    if team_members_cfg:
+        valid_ids, nickname_to_name = _build_team_lookup(team_members_cfg)
+    else:
+        valid_ids = {normalize_member_name(n) for n in member_names if normalize_member_name(n)}
+        nickname_to_name = {}
 
-    def _week_range(ref: datetime) -> tuple[str, str]:
-        mon = ref - timedelta(days=ref.weekday())
-        mon = mon.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = mon + timedelta(days=7)
-        return mon.strftime("%Y-%m-%dT00:00:00Z"), end.strftime("%Y-%m-%dT00:00:00Z")
+    if not valid_ids:
+        return {}
 
-    this_min, this_max = _week_range(reference_date)
-    next_min, next_max = _week_range(reference_date + timedelta(weeks=1))
+    # reference_date 기준 이번 주 월요일 계산 (로컬 시간 = KST)
+    ref = reference_date
+    mon_this = (ref - timedelta(days=ref.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    fri_this = mon_this + timedelta(days=4)
+    mon_next = mon_this + timedelta(days=7)
+    fri_next = mon_next + timedelta(days=4)
+
+    s_mon_this = mon_this.strftime("%Y-%m-%d")
+    s_fri_this = fri_this.strftime("%Y-%m-%d")
+    s_mon_next = mon_next.strftime("%Y-%m-%d")
+    s_fri_next = fri_next.strftime("%Y-%m-%d")
+
+    # 이번 주 월요일 ~ 다음 주 토요일 (exclusive) 범위 한 번에 조회 — KST 오프셋
+    time_min = mon_this.strftime("%Y-%m-%dT00:00:00") + "+09:00"
+    time_max = (fri_next + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00") + "+09:00"
+
+    logger.info(
+        "[vacation] 기준일=%s 이번주=%s~%s 다음주=%s~%s valid_ids=%s",
+        ref.strftime("%Y-%m-%d"), s_mon_this, s_fri_this,
+        s_mon_next, s_fri_next, sorted(valid_ids),
+    )
 
     acc: dict[str, dict[str, list[str]]] = {
         "business_trip": {"this_week": [], "next_week": []},
@@ -233,33 +321,85 @@ def _build_vacation_map(
         "vacation":      {"this_week": [], "next_week": []},
     }
 
+    # (cat, display_name, kind, week) → [date_str, ...]
+    date_buckets: dict[tuple[str, str, str, str], list[str]] = {}
+
     try:
-        for week_key, t_min, t_max in (
-            ("this_week", this_min, this_max),
-            ("next_week", next_min, next_max),
-        ):
-            res = fetch_all_calendar_events(time_min=t_min, time_max=t_max, calendar_id=calendar_id)
-            if not res.ok:
-                logger.warning("[vacation] 캘린더 조회 실패 (%s): %s", week_key, res.error_kind)
+        res = fetch_all_calendar_events(
+            time_min=time_min, time_max=time_max, calendar_id=calendar_id
+        )
+        if not res.ok:
+            logger.warning("[vacation] 캘린더 조회 실패: %s", res.error_kind)
+            return {}
+
+        ev_list = [(e.get("summary"), e.get("start"), e.get("end")) for e in res.events]
+        logger.info("[vacation] 이벤트 %d건: %s", len(res.events), ev_list)
+
+        skipped: list[str] = []
+        unmatched: list[str] = []
+
+        for event in res.events:
+            summary = event.get("summary", "")
+            parsed = _parse_vacation_event(summary)
+            if parsed is None:
+                skipped.append(summary)
                 continue
-            for event in res.events:
-                summary = event.get("summary", "")
-                parsed = _parse_vacation_event(summary)
-                if parsed is None:
+
+            cat_key, event_names, kind = parsed
+            dates = _get_event_dates(event)
+            if cat_key not in acc or not dates:
+                skipped.append(summary)
+                continue
+
+            for event_name in event_names:
+                # valid_ids 로 직접 매칭 (정식 이름 또는 닉네임)
+                matched_id: str | None = None
+                if event_name in valid_ids:
+                    matched_id = event_name
+                else:
+                    for vid in valid_ids:
+                        if event_name in vid or vid in event_name:
+                            matched_id = vid
+                            break
+
+                if matched_id is None:
+                    unmatched.append(f"{summary}({event_name})")
                     continue
-                cat_key, event_names, kind = parsed
-                if cat_key not in acc:
-                    continue
-                for event_name in event_names:
-                    matched = next(
-                        (m for m in norm_members if _event_name_matches_member(event_name, m)),
-                        None,
-                    )
-                    if matched is None:
-                        continue
-                    line = _format_vacation_line(kind, event.get("start", ""), matched)
-                    if line not in acc[cat_key][week_key]:
-                        acc[cat_key][week_key].append(line)
+
+                # 닉네임이면 정식 이름으로 변환
+                display_name = nickname_to_name.get(matched_id, matched_id)
+
+                for date_str in dates:
+                    if s_mon_this <= date_str <= s_fri_this:
+                        week = "this_week"
+                    elif s_mon_next <= date_str <= s_fri_next:
+                        week = "next_week"
+                    else:
+                        continue  # 주말 또는 범위 외
+
+                    bucket_key = (cat_key, display_name, kind, week)
+                    if bucket_key not in date_buckets:
+                        date_buckets[bucket_key] = []
+                    if date_str not in date_buckets[bucket_key]:
+                        date_buckets[bucket_key].append(date_str)
+
+        if skipped:
+            logger.info("[vacation] 파싱/카테고리 스킵 %d건: %s", len(skipped), skipped)
+        if unmatched:
+            logger.info("[vacation] 이름 미매칭 %d건: %s", len(unmatched), unmatched)
+
+        # 날짜 정렬 → 연속 범위 병합 → 라인 생성
+        result_lines: list[str] = []
+        for (cat_key, display_name, kind, week), dates in date_buckets.items():
+            dates.sort()
+            for start, end in _consecutive_day_ranges(dates):
+                line = f"{_format_date_range(start, end)} {display_name}({kind})"
+                if line not in acc[cat_key][week]:
+                    acc[cat_key][week].append(line)
+                result_lines.append(f"{cat_key}[{week[:4]}]:{line}")
+        if result_lines:
+            logger.info("[vacation] 결과 %d건: %s", len(result_lines), result_lines)
+
     except Exception as exc:
         logger.warning("[vacation] 일정 조회 실패: %s", exc)
 
@@ -379,13 +519,16 @@ def _create_by_copy(team_id: str, cfg: dict) -> str:
     full_html = update_week_range_in_assignee_table(full_html, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
 
     # 일정 공유 표 — 캘린더에서 최신 일정 데이터로 교체 (출장/외근/재택/휴가)
-    # vacation_calendar_id 우선, 없으면 calendar_id 사용
-    vacation_cal_id = str(cfg.get("vacation_calendar_id") or calendar_id or "")
+    # vacation_calendar_id 우선, 없으면 settings.VACATION_CALENDAR_ID 사용
+    vacation_cal_id = str(cfg.get("vacation_calendar_id") or VACATION_CALENDAR_ID or "")
     member_names = _get_member_names(cfg)
     if vacation_cal_id and member_names:
         logger.info("[%s] 휴가 캘린더: %s", team_id, vacation_cal_id)
         try:
-            vacation_map = _build_vacation_map(member_names, vacation_cal_id, reference_date)
+            vacation_map = _build_vacation_map(
+                    member_names, vacation_cal_id, reference_date,
+                    team_members_cfg=cfg.get("team_members"),
+                )
             if vacation_map:
                 full_html = fill_schedule_table_vacations(full_html, vacation_map)
                 logger.info("[%s] 일정 공유 업데이트 완료: %s", team_id, list(vacation_map.keys()))
@@ -470,21 +613,6 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
         html = expand_name_placeholder_rows(html, member_names, plans_by_name)
     html = remove_schedule_table_vertical_space(html)
 
-    # 일정 공유 표 — 캘린더에서 일정 데이터 채우기 (출장/외근/재택/휴가)
-    # vacation_calendar_id 우선, 없으면 calendar_id 사용
-    vacation_cal_id = str(cfg.get("vacation_calendar_id") or calendar_id or "")
-    if vacation_cal_id and member_names:
-        logger.info("[%s] 휴가 캘린더: %s", team_id, vacation_cal_id)
-        try:
-            vacation_map = _build_vacation_map(member_names, vacation_cal_id, reference_date)
-            if vacation_map:
-                html = fill_schedule_table_vacations(html, vacation_map)
-                logger.info("[%s] 일정 공유 업데이트 완료: %s", team_id, list(vacation_map.keys()))
-            else:
-                logger.info("[%s] 일정 공유: 해당 주차 이벤트 없음", team_id)
-        except Exception as exc:
-            logger.warning("[%s] 일정 공유 채우기 실패: %s", team_id, exc)
-
     # 4) 정적 섹션 라벨·팀명 교체
     for ph, label in (
         ("NOTICE", "주요 공지(회의 등)"),
@@ -527,6 +655,24 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
         html = html.replace("{{" + ph + "}}", val)
     html = update_week_range_in_schedule_table(html, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
     html = update_week_range_in_assignee_table(html, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
+
+    # 일정 공유 표 — 캘린더에서 일정 데이터 채우기 (출장/외근/재택/휴가)
+    # {{SCHEDULE}} → "일정 공유" 교체 후에 실행해야 테이블을 찾을 수 있음
+    vacation_cal_id = str(cfg.get("vacation_calendar_id") or VACATION_CALENDAR_ID or "")
+    if vacation_cal_id and member_names:
+        logger.info("[%s] 휴가 캘린더: %s", team_id, vacation_cal_id)
+        try:
+            vacation_map = _build_vacation_map(
+                member_names, vacation_cal_id, reference_date,
+                team_members_cfg=cfg.get("team_members"),
+            )
+            if vacation_map:
+                html = fill_schedule_table_vacations(html, vacation_map)
+                logger.info("[%s] 일정 공유 업데이트 완료: %s", team_id, list(vacation_map.keys()))
+            else:
+                logger.info("[%s] 일정 공유: 해당 주차 이벤트 없음", team_id)
+        except Exception as exc:
+            logger.warning("[%s] 일정 공유 채우기 실패: %s", team_id, exc)
 
     # 6) 잔여 플레이스홀더 제거
     html = re.sub(r"\{\{[A-Z0-9_]+\}\}", "", html)

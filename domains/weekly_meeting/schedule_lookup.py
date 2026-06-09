@@ -154,6 +154,26 @@ def lookup_member_vacation(
     )
 
 
+def _name_matches_summary(keyword: str, summary: str) -> bool:
+    """키워드가 이벤트 제목의 이름 부분과 일치하는지 확인.
+
+    '종류(이름)' 형식에서 이름을 추출해 suffix 매칭도 허용.
+    예: keyword='이영은', summary='연차(영은)' → '영은' in '이영은' → True
+    """
+    import re as _re
+    q = keyword.lower()
+    s = summary.lower()
+    if q in s:
+        return True
+    m = _re.search(r"\(([^)]+)\)", summary)
+    if m:
+        for name in m.group(1).split(","):
+            n = name.strip().lower()
+            if n and (n in q or q in n):
+                return True
+    return False
+
+
 def lookup_member_vacation_range(
     *,
     member_keywords: list[str],
@@ -164,7 +184,11 @@ def lookup_member_vacation_range(
     """지정된 시간 범위 내 팀원 휴가 이벤트 조회."""
     matched: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    vacation_keywords = ("휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation")
+    vacation_keywords = (
+        "휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation",
+        "리프레시", "리프레쉬", "출산", "육아", "경조", "공가", "병가",
+        "대체", "아이돌봄", "장기근속", "생일", "샌드위치", "조퇴",
+    )
     for keyword in member_keywords:
         q = keyword.strip()
         if not q:
@@ -176,7 +200,7 @@ def lookup_member_vacation_range(
             summary = event.get("summary", "")
             if not _contains_any(summary, vacation_keywords):
                 continue
-            if q.lower() not in summary.lower():
+            if not _name_matches_summary(q, summary):
                 continue
             key = (summary, event.get("start", ""))
             if key in seen:
@@ -205,6 +229,8 @@ def fetch_all_calendar_events(
 _ALL_SCHEDULE_KEYWORDS = (
     "출장", "외근", "재택",
     "휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation",
+    "리프레시", "리프레쉬", "출산", "육아", "경조", "공가", "병가",
+    "대체", "아이돌봄", "장기근속", "생일", "샌드위치", "조퇴",
 )
 
 
@@ -229,7 +255,7 @@ def lookup_member_schedule_range(
             summary = event.get("summary", "")
             if not _contains_any(summary, _ALL_SCHEDULE_KEYWORDS):
                 continue
-            if q.lower() not in summary.lower():
+            if not _name_matches_summary(q, summary):
                 continue
             key = (summary, event.get("start", ""))
             if key in seen:

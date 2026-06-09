@@ -32,3 +32,9 @@ BOT_SA_EMAIL = (
     os.environ.get("BOT_SA_EMAIL")
     or "all-meet-test@ai-agent-test-482706.iam.gserviceaccount.com"
 )
+
+# 휴가 캘린더 ID — 일정 공유 표에 사용. vacation_calendar_id 미설정 팀의 fallback.
+VACATION_CALENDAR_ID = (
+    os.environ.get("VACATION_CALENDAR_ID")
+    or "c_u19ilp3ptq42lgd7os70ir6vuo@group.calendar.google.com"
+)
