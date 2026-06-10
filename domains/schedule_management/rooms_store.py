@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from domains.schedule_management.gunsan_rooms import (
@@ -15,6 +16,8 @@ _CONFIG_COLLECTION = "config"
 _ROOMS_DOC = "rooms"
 
 _DUMMY_ROOMS: list[dict[str, Any]] = gunsan_rooms_from_catalog()
+_ROOMS_CACHE: tuple[float, list[dict[str, Any]]] | None = None
+_ROOMS_TTL_SEC = 120
 
 
 def _normalize_room(row: dict[str, Any]) -> dict[str, Any]:
@@ -59,19 +62,32 @@ def _enrich_with_catalog(rooms: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def clear_rooms_cache() -> None:
+    global _ROOMS_CACHE
+    _ROOMS_CACHE = None
+
+
 def get_rooms() -> list[dict[str, Any]]:
+    global _ROOMS_CACHE
+    now = time.monotonic()
+    if _ROOMS_CACHE and (now - _ROOMS_CACHE[0]) < _ROOMS_TTL_SEC:
+        return [dict(r) for r in _ROOMS_CACHE[1]]
     db = get_client()
     snap = db.collection(_CONFIG_COLLECTION).document(_ROOMS_DOC).get()
     if not snap.exists:
-        return _enrich_with_catalog([dict(r) for r in _DUMMY_ROOMS])
-    data = snap.to_dict() or {}
-    rooms = data.get("rooms") or []
-    out = [_normalize_room(r) for r in rooms if isinstance(r, dict) and r.get("id")]
-    base = out or [dict(r) for r in _DUMMY_ROOMS]
-    return _enrich_with_catalog(base)
+        result = _enrich_with_catalog([dict(r) for r in _DUMMY_ROOMS])
+    else:
+        data = snap.to_dict() or {}
+        rooms = data.get("rooms") or []
+        out = [_normalize_room(r) for r in rooms if isinstance(r, dict) and r.get("id")]
+        base = out or [dict(r) for r in _DUMMY_ROOMS]
+        result = _enrich_with_catalog(base)
+    _ROOMS_CACHE = (now, [dict(r) for r in result])
+    return [dict(r) for r in result]
 
 
 def upsert_rooms(rooms: list[dict[str, Any]]) -> None:
+    clear_rooms_cache()
     normalized = [_normalize_room(r) for r in rooms if isinstance(r, dict)]
     db = get_client()
     db.collection(_CONFIG_COLLECTION).document(_ROOMS_DOC).set({"rooms": normalized}, merge=True)

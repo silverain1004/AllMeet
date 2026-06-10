@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from domains.schedule_management.cards import (
+    build_booking_confirmed_card,
     build_compose_card,
     build_result_card,
     build_settings_card,
@@ -15,7 +16,6 @@ from domains.schedule_management.calendar_client import (
     KST,
     calendar_error_message,
     create_event,
-    delete_event,
     extract_meet_link,
     freebusy_query,
     is_dry_run,
@@ -24,11 +24,20 @@ from domains.schedule_management.calendar_client import (
 )
 from domains.schedule_management.compose_state import (
     apply_duration_mode,
+    attendee_emails_for_event,
     compose_state_from,
     empty_compose_state,
+    ready_for_quick_room_preview,
     resolve_end_time,
+    serialize_attendees,
     state_to_button_params,
+    sync_attendee_count_from_headcount,
 )
+from domains.schedule_management.compose_availability import (
+    can_fetch_compose_snapshot,
+    fetch_compose_snapshot,
+)
+from domains.schedule_management.conflict_slots import ConflictCheckResult, check_schedule_conflicts
 from domains.schedule_management.conversation import extract_compose_state_with_llm_fallback
 from domains.schedule_management.oauth_calendar import (
     decode_calendar_selection,
@@ -42,6 +51,7 @@ from domains.schedule_management.room_calendar_store import (
     update_room_calendar_config,
 )
 from domains.schedule_management.rooms import get_group_booking_summary, recommend_rooms
+from domains.schedule_management.rooms_store import get_rooms
 from domains.schedule_management.rooms_store import get_rooms
 from domains.schedule_management.rooms_sync import sync_resource_rooms_from_calendar_list
 from domains.weekly_meeting.oauth_callback import build_authorization_url, encode_state
@@ -218,6 +228,12 @@ def _ensure_calendar_id(state: dict[str, Any], chat_event: dict[str, Any] | None
         state["calendar_id"] = opts[0]["id"]
 
 
+def _ensure_default_duration(state: dict[str, Any]) -> None:
+    if state.get("meeting_time") and not str(state.get("duration_mode") or "").strip():
+        state["duration_mode"] = "1h"
+        state["duration_minutes"] = 60
+
+
 def _render_compose(
     state: dict[str, Any],
     *,
@@ -229,16 +245,53 @@ def _render_compose(
     ctx = _user_context(chat_event)
     email = ctx.get("email", "")
     _ensure_calendar_id(state, chat_event)
+    _ensure_default_duration(state)
     apply_duration_mode(state)
     api_cal, token = _resolve_calendar_auth(str(state.get("calendar_id") or ""), chat_event)
-    access = token or (get_user_access_token(email) if email else None)
-    rooms = recommend_rooms(
-        state,
-        max_n=3,
-        duration_minutes=int(state.get("duration_minutes") or 60),
-        access_token=access,
-    )
-    group_summary = get_group_booking_summary(state, access_token=access)
+    access = token or (get_user_access_token(email) if email and is_oauth_linked(email) else None)
+    step = str(state.get("compose_step") or "quick")
+    conflict_mode = "light" if step == "quick" else "full"
+    preview_ready = ready_for_quick_room_preview(state)
+    room_list = get_rooms()
+    snapshot = None
+    conflict_check: ConflictCheckResult | None = None
+    rooms: list[dict[str, Any]] = []
+    group_summary = ""
+    if preview_ready:
+        if access and can_fetch_compose_snapshot(state):
+            snapshot = fetch_compose_snapshot(
+                state,
+                access_token=access,
+                rooms=room_list,
+                api_calendar_id=api_cal,
+                booker_email=email,
+                fetch_booker_events=(conflict_mode == "full"),
+                duration_minutes=int(state.get("duration_minutes") or 60),
+            )
+        if access and not state.get("ignore_conflict"):
+            conflict_check = check_schedule_conflicts(
+                state,
+                access_token=access,
+                user_email=email,
+                user_name=ctx.get("name") or "나",
+                api_calendar_id=api_cal,
+                snapshot=snapshot,
+                mode=conflict_mode,
+            )
+        rooms = recommend_rooms(
+            state,
+            max_n=3,
+            duration_minutes=int(state.get("duration_minutes") or 60),
+            access_token=access,
+            snapshot=snapshot,
+            rooms=room_list,
+        )
+        group_summary = get_group_booking_summary(
+            state,
+            access_token=access,
+            snapshot=snapshot,
+            rooms=room_list,
+        )
     linked = bool(email and is_oauth_linked(email))
     return build_compose_card(
         state,
@@ -249,6 +302,8 @@ def _render_compose(
         oauth_linked=linked,
         oauth_url=_oauth_url(chat_event),
         group_booking_summary=group_summary,
+        conflict_check=conflict_check,
+        room_preview_ready=preview_ready,
         include_action_response=include_action_response,
     )
 
@@ -279,7 +334,49 @@ def _merge_extracted_state(base: dict[str, Any], extracted: dict[str, Any]) -> d
             out["duration_mode"] = "2h"
         elif dm != 60:
             out["duration_mode"] = "custom"
+    if out.get("meeting_time") and not str(out.get("duration_mode") or "").strip():
+        out["duration_mode"] = "1h"
+        out["duration_minutes"] = 60
     return out
+
+
+def _ensure_booker_in_attendees(state: dict[str, Any], booker_email: str) -> None:
+    email = str(booker_email or "").strip()
+    if not email:
+        return
+    name = ""
+    for a in state.get("attendees") or []:
+        if str(a.get("email") or "").strip().lower() == email.lower():
+            return
+    state.setdefault("attendees", []).insert(0, {"name": name, "email": email})
+
+
+def _booking_invite_params(
+    *,
+    state: dict[str, Any],
+    store_cal: str,
+    event_id: str,
+    attendee_emails: list[str],
+    end_time: str,
+    meet_link: str,
+    html_link: str,
+    booker_email: str,
+) -> dict[str, str]:
+    return {
+        "last_event_id": event_id,
+        "last_api_calendar_id": store_cal,
+        "calendar_id": str(state.get("calendar_id") or ""),
+        "title": str(state.get("title") or ""),
+        "meeting_date": str(state.get("meeting_date") or ""),
+        "meeting_time": str(state.get("meeting_time") or ""),
+        "meeting_end_time": end_time,
+        "location": str(state.get("picked_room_name") or ""),
+        "attendees_pipe": serialize_attendees(state.get("attendees") or []),
+        "attendee_emails": ",".join(attendee_emails),
+        "booker_email": booker_email,
+        "meet_url": meet_link,
+        "html_link": html_link,
+    }
 
 
 def _validate_time_state(state: dict[str, Any]) -> list[str]:
@@ -315,6 +412,8 @@ def handle_schedule_management(
     extracted = extract_compose_state_with_llm_fallback(user_message, members=members)
     state = _merge_extracted_state(empty_compose_state(), extracted)
     state["compose_step"] = "quick"
+    _ensure_booker_in_attendees(state, _user_context(chat_event).get("email", ""))
+    sync_attendee_count_from_headcount(state)
     _ensure_calendar_id(state, chat_event)
     out = _render_compose(state, chat_event=chat_event, members=members)
     out["text"] = "간편 예약 화면입니다."
@@ -398,11 +497,77 @@ def handle_schedule_management_action(
             state["compose_step"] = "quick"
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
+    if invoked_function == "sm_send_invite":
+        api_cal = parameters.get("last_api_calendar_id") or ""
+        event_id = parameters.get("last_event_id") or ""
+        calendar_sel = parameters.get("calendar_id") or ""
+        title = parameters.get("title") or ""
+        if not api_cal or not event_id or not title:
+            return build_result_card(
+                title="초대 메일 실패",
+                lines=["초대 메일을 보낼 예약 정보가 없습니다."],
+                include_action_response=True,
+            )
+        _, access_token = _resolve_calendar_auth(calendar_sel, chat_event)
+        if not access_token:
+            return build_result_card(
+                title="초대 메일 실패",
+                lines=["캘린더 OAuth 연결이 필요합니다."],
+                include_action_response=True,
+            )
+        result = patch_event(
+            calendar_id=api_cal,
+            event_id=event_id,
+            summary=title,
+            send_updates="all",
+            access_token=access_token,
+        )
+        if not result.ok:
+            return build_result_card(
+                title="초대 메일 실패",
+                lines=[calendar_error_message(result)],
+                include_action_response=True,
+            )
+        attendee_emails = [
+            e.strip() for e in (parameters.get("attendee_emails") or "").split(",") if e.strip()
+        ]
+        booker_email = str(parameters.get("booker_email") or user_context.get("email") or "")
+        return build_booking_confirmed_card(
+            status="created",
+            meeting_title=title,
+            meeting_date=str(parameters.get("meeting_date") or ""),
+            meeting_time=str(parameters.get("meeting_time") or ""),
+            meeting_end_time=str(parameters.get("meeting_end_time") or ""),
+            location=str(parameters.get("location") or ""),
+            attendee_emails=attendee_emails,
+            invite_sent=True,
+            booker_email=booker_email,
+            meet_link=str(parameters.get("meet_url") or ""),
+            html_link=str(parameters.get("html_link") or ""),
+            include_action_response=True,
+        )
+
     state = compose_state_from(parameters, form_inputs)
     pending: list[dict[str, str]] | None = None
 
     if invoked_function in ("sm_compose_refresh", "sm_compose_quick_update"):
         state["compose_step"] = "quick"
+        state["errors"] = []
+        state["ignore_conflict"] = False
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
+
+    if invoked_function == "sm_compose_pick_slot":
+        state["compose_step"] = "quick"
+        state["meeting_date"] = parameters.get("slot_date") or state.get("meeting_date") or ""
+        state["meeting_time"] = parameters.get("slot_time") or state.get("meeting_time") or ""
+        state["meeting_end_time"] = parameters.get("slot_end_time") or ""
+        state["ignore_conflict"] = False
+        state["errors"] = []
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
+
+    if invoked_function == "sm_compose_keep_requested_time":
+        state["compose_step"] = "quick"
+        state["ignore_conflict"] = True
         state["errors"] = []
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
@@ -514,11 +679,9 @@ def handle_schedule_management_action(
         start_iso = to_kst_iso(str(state["meeting_date"]), str(state["meeting_time"]))
         end_iso = to_kst_iso(str(state["meeting_date"]), end_time)
 
-        attendee_emails = [
-            str(a.get("email") or "").strip()
-            for a in (state.get("attendees") or [])
-            if str(a.get("email") or "").strip()
-        ]
+        booker_email = user_context.get("email", "")
+        _ensure_booker_in_attendees(state, booker_email)
+        attendee_emails = attendee_emails_for_event(state, booker_email)
         location = str(state.get("picked_room_name") or "").strip()
         picked_room = _room_by_id(str(state.get("picked_room_id") or ""))
         resource_id = str((picked_room or {}).get("calendar_resource_id") or "").strip()
@@ -560,6 +723,7 @@ def handle_schedule_management_action(
                 location=location,
                 description="AllMeet 예약",
                 add_google_meet=want_meet,
+                send_updates="none",
                 access_token=access_token,
             )
         if not result.ok:
@@ -574,88 +738,56 @@ def handle_schedule_management_action(
         html_link = str(event.get("htmlLink") or "")
         event_id = str(event.get("id") or "") or existing_event_id
 
-        lines = []
         is_update = bool(existing_event_id and existing_api_cal)
         if is_dry_run():
-            lines.append("(드라이런) 실제 캘린더에는 저장되지 않았습니다.")
+            booking_status = "dry_run"
         elif is_update:
-            lines.append("예약이 변경되었습니다.")
+            booking_status = "updated"
         else:
-            lines.append("예약이 생성되었습니다.")
-        lines.extend(
-            [
-                f"캘린더: {state.get('calendar_id')}",
-                f"제목: {state.get('title')}",
-                f"일시: {state.get('meeting_date')} {state.get('meeting_time')} ~ {end_time}",
-            ]
-        )
-        ac = state.get("attendee_count")
-        if ac:
-            lines.append(f"참석 인원: {ac}+")
-        if attendee_emails:
-            lines.append(f"참석자: {', '.join(attendee_emails)}")
-        if meet_link:
-            lines.append(f"Meet: {meet_link}")
-        if html_link:
-            lines.append(f"일정 링크: {html_link}")
-        if location:
-            lines.append(f"회의실: {location}")
+            booking_status = "created"
 
-        cancel_params: dict[str, str] = {}
         store_cal = existing_api_cal if is_update else api_cal
-        if event_id and not is_dry_run():
-            if not is_update:
-                res_id = save_reservation(
-                    user_email=user_context.get("email", ""),
-                    calendar_id=store_cal,
-                    event_id=event_id,
-                    summary=str(state.get("title")),
-                    start_iso=start_iso,
-                    end_iso=end_iso,
-                    html_link=html_link,
-                    extra={"meet_link": meet_link},
-                )
-                cancel_params["last_reservation_id"] = res_id
-            cancel_params.update(
-                {
-                    "last_event_id": event_id,
-                    "last_api_calendar_id": store_cal,
-                    "calendar_id": str(state.get("calendar_id")),
-                }
+        if event_id and not is_dry_run() and not is_update:
+            save_reservation(
+                user_email=user_context.get("email", ""),
+                calendar_id=store_cal,
+                event_id=event_id,
+                summary=str(state.get("title")),
+                start_iso=start_iso,
+                end_iso=end_iso,
+                html_link=html_link,
+                extra={"meet_link": meet_link},
             )
 
-        return build_result_card(
-            title="예약 확정",
-            lines=lines,
+        invite_params = None
+        if event_id and not is_dry_run() and not is_update:
+            invite_params = _booking_invite_params(
+                state=state,
+                store_cal=store_cal,
+                event_id=event_id,
+                attendee_emails=attendee_emails,
+                end_time=end_time,
+                meet_link=meet_link,
+                html_link=html_link,
+                booker_email=booker_email,
+            )
+
+        return build_booking_confirmed_card(
+            status=booking_status,
+            meeting_title=str(state.get("title") or ""),
+            meeting_date=str(state.get("meeting_date") or ""),
+            meeting_time=str(state.get("meeting_time") or ""),
+            meeting_end_time=end_time,
+            location=location,
+            attendee_count=state.get("attendee_count"),
+            attendee_emails=attendee_emails,
+            invite_sent=False,
+            invite_params=invite_params,
+            booker_email=booker_email,
+            meet_link=meet_link,
+            html_link=html_link,
             include_action_response=True,
-            cancel_params=cancel_params,
         )
-
-    if invoked_function == "sm_cancel_reservation":
-        api_cal = parameters.get("last_api_calendar_id") or ""
-        event_id = parameters.get("last_event_id") or ""
-        if not api_cal or not event_id:
-            return build_result_card(
-                title="취소 실패",
-                lines=["취소할 예약 정보가 없습니다."],
-                include_action_response=True,
-            )
-        _, access_token = _resolve_calendar_auth(
-            parameters.get("calendar_id", ""), chat_event
-        )
-        del_result = delete_event(
-            calendar_id=api_cal,
-            event_id=event_id,
-            access_token=access_token,
-        )
-        if not del_result.ok:
-            return build_result_card(
-                title="취소 실패",
-                lines=[calendar_error_message(del_result)],
-                include_action_response=True,
-            )
-        msg = "(드라이런) 취소 시뮬레이션" if is_dry_run() else "예약이 취소되었습니다."
-        return build_result_card(title="예약 취소", lines=[msg], include_action_response=True)
 
     return build_result_card(
         title="알 수 없는 요청",

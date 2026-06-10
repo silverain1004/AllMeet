@@ -24,6 +24,10 @@ from domains.schedule_management.compose_state import (
 
     ATTENDEE_COUNT_OPTIONS,
 
+    BUSINESS_HOUR_END,
+
+    BUSINESS_HOUR_START,
+
     format_date_korean,
 
     resolve_end_time,
@@ -82,7 +86,12 @@ def _wrap_card(
 
 
 
-def _time_options(*, start: str = "06:00", end: str = "22:50", step_min: int = 10) -> list[dict[str, Any]]:
+def _time_options(
+    *,
+    start: str = BUSINESS_HOUR_START,
+    end: str = BUSINESS_HOUR_END,
+    step_min: int = 10,
+) -> list[dict[str, Any]]:
 
     sh, sm = map(int, start.split(":"))
 
@@ -452,11 +461,17 @@ def _time_dropdown(
 
     items = _time_options()
 
-    for item in items:
+    if selected and not any(item.get("value") == selected for item in items):
 
-        if item["value"] == selected:
+        items.append({"text": selected, "value": selected, "selected": True})
 
-            item["selected"] = True
+    else:
+
+        for item in items:
+
+            if item.get("value") == selected:
+
+                item["selected"] = True
 
     return {
 
@@ -736,6 +751,179 @@ def build_settings_card(
 
 
 
+_ICON_CALENDAR = "https://www.gstatic.com/images/branding/product/2x/calendar_48dp.png"
+_ICON_SCHEDULE = "https://www.gstatic.com/images/icons/material/system/2x/schedule_gm_blue_24dp.png"
+_ICON_ROOM = "https://www.gstatic.com/images/icons/material/system/2x/meeting_room_gm_blue_24dp.png"
+_ICON_EVENT = "https://www.gstatic.com/images/icons/material/system/2x/event_gm_blue_24dp.png"
+_ICON_GROUP = "https://www.gstatic.com/images/icons/material/system/2x/group_gm_blue_24dp.png"
+_ICON_VIDEO = "https://www.gstatic.com/images/icons/material/system/2x/videocam_gm_blue_24dp.png"
+_ICON_MAIL = "https://www.gstatic.com/images/icons/material/system/2x/email_gm_blue_24dp.png"
+
+_WEEKDAYS_KO = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def _icon_text_widget(*, top_label: str, text: str, icon_url: str) -> dict[str, Any]:
+    return {
+        "decoratedText": {
+            "topLabel": top_label,
+            "text": html.escape(text),
+            "wrapText": True,
+            "startIcon": {"iconUrl": icon_url},
+        }
+    }
+
+
+def _format_booking_datetime(date_str: str, start_time: str, end_time: str) -> str:
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        wd = _WEEKDAYS_KO[d.weekday()]
+        date_part = f"{d.year}년 {d.month}월 {d.day}일 ({wd})"
+    except ValueError:
+        date_part = format_date_korean(date_str) or date_str
+    return f"{date_part}  {start_time} ~ {end_time}"
+
+
+def build_booking_confirmed_card(
+    *,
+    status: str,
+    meeting_title: str,
+    meeting_date: str,
+    meeting_time: str,
+    meeting_end_time: str,
+    location: str = "",
+    attendee_count: str | int | None = None,
+    attendee_emails: list[str] | None = None,
+    invite_sent: bool = False,
+    invite_params: dict[str, str] | None = None,
+    booker_email: str = "",
+    meet_link: str = "",
+    html_link: str = "",
+    include_action_response: bool = False,
+) -> dict[str, Any]:
+    """예약 확정 결과 카드 — 필드별 아이콘·링크 버튼."""
+    status_messages = {
+        "created": ('<font color="#137333"><b>✅ 예약이 완료되었습니다</b></font>', "예약 완료"),
+        "updated": ('<font color="#137333"><b>✅ 예약이 변경되었습니다</b></font>', "예약 변경"),
+        "dry_run": (
+            '<font color="#b06000"><b>⚠️ 드라이런 모드</b></font><br>'
+            "실제 캘린더에는 저장되지 않았습니다.",
+            "드라이런",
+        ),
+    }
+    banner_html, subtitle = status_messages.get(status, status_messages["created"])
+
+    detail_widgets: list[dict[str, Any]] = [
+        {"textParagraph": {"text": banner_html}},
+        {"divider": {}},
+        _icon_text_widget(
+            top_label="일시",
+            text=_format_booking_datetime(meeting_date, meeting_time, meeting_end_time),
+            icon_url=_ICON_SCHEDULE,
+        ),
+    ]
+    if location:
+        detail_widgets.append(
+            _icon_text_widget(top_label="회의실", text=location, icon_url=_ICON_ROOM)
+        )
+    detail_widgets.append(
+        _icon_text_widget(top_label="제목", text=meeting_title or "제목 없음", icon_url=_ICON_EVENT)
+    )
+
+    attendees = [e for e in (attendee_emails or []) if e]
+    if attendees:
+        attendee_lines = "\n".join(attendees)
+        detail_widgets.append(
+            _icon_text_widget(
+                top_label=f"참석자 ({len(attendees)}명)",
+                text=attendee_lines,
+                icon_url=_ICON_GROUP,
+            )
+        )
+    elif attendee_count:
+        detail_widgets.append(
+            _icon_text_widget(
+                top_label="참석 인원",
+                text=f"{attendee_count}명 이상",
+                icon_url=_ICON_GROUP,
+            )
+        )
+    if invite_sent:
+        detail_widgets.append(
+            _icon_text_widget(
+                top_label="초대 메일",
+                text="참석자에게 Google Calendar 초대 메일을 보냈습니다.",
+                icon_url=_ICON_MAIL,
+            )
+        )
+
+    sections: list[dict[str, Any]] = [{"widgets": detail_widgets}]
+
+    link_buttons: list[dict[str, Any]] = []
+    if meet_link:
+        link_buttons.append(
+            {
+                "text": "Google Meet 참여",
+                "type": "FILLED",
+                "onClick": {"openLink": {"url": meet_link}},
+            }
+        )
+    if html_link:
+        link_buttons.append(
+            {
+                "text": "캘린더에서 보기",
+                "onClick": {"openLink": {"url": html_link}},
+            }
+        )
+    if link_buttons:
+        sections.append({"header": "바로가기", "widgets": [{"buttonList": {"buttons": link_buttons}}]})
+
+    footer_buttons: list[dict[str, Any]] = [
+        {"text": "홈으로", "onClick": {"action": {"function": "hm_open_menu"}}}
+    ]
+    booker_lower = str(booker_email or "").strip().lower()
+    other_attendees = [e for e in attendees if e.lower() != booker_lower]
+    if (
+        invite_params
+        and not invite_sent
+        and other_attendees
+        and status != "dry_run"
+    ):
+        footer_buttons.insert(
+            0,
+            {
+                "text": "초대메일전송",
+                "type": "FILLED",
+                "onClick": {
+                    "action": {
+                        "function": "sm_send_invite",
+                        "parameters": _params_list(invite_params),
+                    }
+                },
+            },
+        )
+    sections.append({"widgets": [{"buttonList": {"buttons": footer_buttons}}]})
+
+    out: dict[str, Any] = {
+        "cardsV2": [
+            {
+                "cardId": "sm_booking_confirmed",
+                "card": {
+                    "header": {
+                        "title": "예약 확정",
+                        "subtitle": subtitle,
+                        "imageUrl": _ICON_CALENDAR,
+                        "imageType": "CIRCLE",
+                    },
+                    "sections": sections,
+                },
+            }
+        ]
+    }
+    if include_action_response:
+        out["actionResponse"] = {"type": "UPDATE_MESSAGE"}
+    return out
+
+
 def build_result_card(
 
     *,
@@ -746,63 +934,11 @@ def build_result_card(
 
     include_action_response: bool = False,
 
-    cancel_params: dict[str, str] | None = None,
-
 ) -> dict[str, Any]:
 
     body = "<br>".join(html.escape(line) for line in lines) if lines else "-"
 
     buttons: list[dict[str, Any]] = [{"text": "홈으로", "onClick": {"action": {"function": "hm_open_menu"}}}]
-
-    if cancel_params and cancel_params.get("last_event_id"):
-
-        buttons.insert(
-
-            0,
-
-            {
-
-                "text": "예약 취소",
-
-                "onClick": {
-
-                    "action": {
-
-                        "function": "sm_cancel_reservation",
-
-                        "parameters": _params_list(cancel_params),
-
-                    }
-
-                },
-
-            },
-
-        )
-
-        buttons.insert(
-
-            0,
-
-            {
-
-                "text": "일정 변경",
-
-                "onClick": {
-
-                    "action": {
-
-                        "function": "sm_open_compose",
-
-                        "parameters": _params_list(cancel_params),
-
-                    }
-
-                },
-
-            },
-
-        )
 
     widgets = [
 
@@ -978,6 +1114,17 @@ def _availability_badge(room: dict[str, Any]) -> str:
 
 
 
+def _room_widgets_pending() -> list[dict[str, Any]]:
+    return [
+        {"textParagraph": {"text": "<b>추천 회의실</b>"}},
+        {
+            "textParagraph": {
+                "text": "날짜·인원·시간을 모두 선택하면 추천 회의실이 표시됩니다.",
+            }
+        },
+    ]
+
+
 def _room_widgets(
 
     rooms: list[dict[str, Any]],
@@ -1068,6 +1215,98 @@ def _room_widgets(
 
 
 
+def _conflict_widgets(
+    conflict_check: Any,
+    state: dict[str, Any],
+    base_params: dict[str, str],
+) -> list[dict[str, Any]]:
+    if not conflict_check or not getattr(conflict_check, "has_conflict", False):
+        return []
+
+    widgets: list[dict[str, Any]] = [
+        {"textParagraph": {"text": "<b>일정이 겹칩니다</b>"}},
+    ]
+    for conflict in conflict_check.conflicts or []:
+        label = html.escape(str(conflict.label or ""))
+        summary = html.escape(str(conflict.event_summary or ""))
+        when = html.escape(str(conflict.display_time or ""))
+        line = f"{label}: {summary}"
+        if when:
+            line += f" ({when})"
+        row_buttons: list[dict[str, Any]] = []
+        link = str(conflict.html_link or "").strip()
+        if link:
+            row_buttons.append(
+                {
+                    "text": "캘린더에서 보기",
+                    "onClick": {"openLink": {"url": link}},
+                }
+            )
+        if row_buttons:
+            widgets.append(
+                {
+                    "decoratedText": {
+                        "text": line,
+                        "wrapText": True,
+                        "button": row_buttons[0],
+                    }
+                }
+            )
+        else:
+            widgets.append({"textParagraph": {"text": line}})
+
+    alternatives = conflict_check.alternatives or []
+    if alternatives:
+        widgets.append({"textParagraph": {"text": "<b>이 시간은 회의실도 가능해요</b>"}})
+        alt_buttons: list[dict[str, Any]] = []
+        for slot in alternatives:
+            room = html.escape(str(slot.top_room_name or "회의실"))
+            label = f"{slot.meeting_time}~{slot.meeting_end_time} · {room}"
+            params = dict(base_params)
+            params.update(
+                {
+                    "slot_date": slot.meeting_date,
+                    "slot_time": slot.meeting_time,
+                    "slot_end_time": slot.meeting_end_time,
+                }
+            )
+            alt_buttons.append(
+                {
+                    "text": label[:80],
+                    "onClick": {
+                        "action": {
+                            "function": "sm_compose_pick_slot",
+                            "parameters": _params_list(params),
+                        }
+                    },
+                }
+            )
+        widgets.append({"buttonList": {"buttons": alt_buttons}})
+
+    requested = html.escape(str(conflict_check.requested_time or state.get("meeting_time") or ""))
+    keep_params = dict(base_params)
+    keep_params["ignore_conflict"] = "1"
+    widgets.append(
+        {
+            "buttonList": {
+                "buttons": [
+                    {
+                        "text": f"요청한 {requested} 그대로 진행",
+                        "onClick": {
+                            "action": {
+                                "function": "sm_compose_keep_requested_time",
+                                "parameters": _params_list(keep_params),
+                            }
+                        },
+                    }
+                ]
+            }
+        }
+    )
+    widgets.append({"divider": {}})
+    return widgets
+
+
 def build_quick_compose_card(
 
     state: dict[str, Any],
@@ -1077,6 +1316,10 @@ def build_quick_compose_card(
     recommended_rooms: list[dict[str, Any]],
 
     group_booking_summary: str = "",
+
+    conflict_check: Any = None,
+
+    room_preview_ready: bool = True,
 
     include_action_response: bool = False,
 
@@ -1088,7 +1331,7 @@ def build_quick_compose_card(
 
     widgets: list[dict[str, Any]] = _error_widgets(state.get("errors") or [])
 
-
+    widgets.extend(_conflict_widgets(conflict_check, state, base_params))
 
     date_val = str(state.get("meeting_date") or "")
 
@@ -1108,7 +1351,10 @@ def build_quick_compose_card(
 
 
 
-    widgets.extend(_room_widgets(recommended_rooms, state, base_params))
+    if room_preview_ready:
+        widgets.extend(_room_widgets(recommended_rooms, state, base_params))
+    else:
+        widgets.extend(_room_widgets_pending())
 
 
 
@@ -1528,6 +1774,10 @@ def build_compose_card(
 
     group_booking_summary: str = "",
 
+    conflict_check: Any = None,
+
+    room_preview_ready: bool = True,
+
     include_action_response: bool = False,
 
 ) -> dict[str, Any]:
@@ -1561,6 +1811,10 @@ def build_compose_card(
         recommended_rooms=recommended_rooms,
 
         group_booking_summary=group_booking_summary,
+
+        conflict_check=conflict_check,
+
+        room_preview_ready=room_preview_ready,
 
         include_action_response=include_action_response,
 

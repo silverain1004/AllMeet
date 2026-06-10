@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from domains.schedule_management.compose_availability import ComposeCalendarSnapshot
 
 from domains.schedule_management.calendar_client import (
     KST,
@@ -43,6 +46,52 @@ def _room_equipment_line(room: dict[str, Any]) -> str:
     return ", ".join(equipment) if equipment else "장비 정보 없음"
 
 
+def _attendee_count_for_state(state: dict[str, Any]) -> int:
+    attendees = state.get("attendees") or []
+    explicit = state.get("attendee_count")
+    if explicit is not None:
+        try:
+            return max(int(explicit), 1)
+        except (TypeError, ValueError):
+            return max(len(attendees), 1)
+    return max(len(attendees), 1)
+
+
+def _room_recommendation_sort_key(
+    room: dict[str, Any],
+    *,
+    attendee_count: int,
+    score: float = 0.0,
+) -> tuple[int, int, int, float]:
+    cap = int(room.get("capacity") or 0)
+    avail = str(room.get("availability") or "")
+    avail_rank = {"free": 0, "busy": 1}.get(avail, 0) if avail else 0
+    if cap <= 0:
+        fit_rank = 1
+        excess = 9999
+    elif cap < attendee_count:
+        fit_rank = 2
+        excess = 9999
+    else:
+        fit_rank = 0
+        excess = cap - attendee_count
+    return (avail_rank, fit_rank, excess, -score)
+
+
+def _sort_rooms_for_recommendation(
+    rooms: list[dict[str, Any]],
+    *,
+    attendee_count: int,
+) -> None:
+    rooms.sort(
+        key=lambda r: _room_recommendation_sort_key(
+            r,
+            attendee_count=attendee_count,
+            score=float(r.get("_recommend_score") or 0),
+        )
+    )
+
+
 def score_rooms(
     rooms: list[dict[str, Any]],
     *,
@@ -60,6 +109,7 @@ def score_rooms(
         cap = int(room.get("capacity") or 0)
         if attendee_count > 0 and cap >= attendee_count:
             score += 30
+            score -= (cap - attendee_count) * 0.1
         elif attendee_count > 0 and cap > 0:
             score -= 10
         equip = [str(e).lower() for e in (room.get("equipment") or [])]
@@ -183,23 +233,12 @@ def _busy_emails_from_freebusy(
     return busy_emails
 
 
-def recommend_rooms(
+def ordered_rooms_for_state(
     state: dict[str, Any],
-    *,
-    max_n: int = 3,
-    duration_minutes: int = 60,
-    access_token: str | None = None,
+    rooms: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    rooms = get_rooms()
-    attendees = state.get("attendees") or []
     explicit = state.get("attendee_count")
-    if explicit is not None:
-        try:
-            attendee_count = max(int(explicit), 1)
-        except (TypeError, ValueError):
-            attendee_count = max(len(attendees), 1)
-    else:
-        attendee_count = max(len(attendees), 1)
+    attendee_count = _attendee_count_for_state(state)
     equipment_keywords = state.get("equipment_keywords") or []
     location_keyword = str(state.get("location_keyword") or "")
     name_keyword = str(state.get("room_name_keyword") or "")
@@ -211,86 +250,46 @@ def recommend_rooms(
         location_keyword=location_keyword,
         name_keyword=name_keyword,
     )
-    ordered = [r for r, _ in scored]
+    ordered: list[dict[str, Any]] = []
+    for room, score in scored:
+        row = dict(room)
+        row["_recommend_score"] = score
+        ordered.append(row)
     if explicit is not None:
         ordered = [
             r
             for r in ordered
             if int(r.get("capacity") or 0) >= attendee_count or int(r.get("capacity") or 0) == 0
         ]
+    _sort_rooms_for_recommendation(ordered, attendee_count=attendee_count)
+    return ordered
 
-    date = str(state.get("meeting_date") or "").strip()
-    time_str = str(state.get("meeting_time") or "").strip()
-    duration_mode = str(state.get("duration_mode") or "").strip()
-    eff_duration = _availability_duration_minutes(state, duration_minutes)
-    can_check = bool(date and time_str)
-    if duration_mode == "custom":
-        can_check = can_check and bool(str(state.get("meeting_end_time") or "").strip())
-    if can_check:
+
+def recommend_rooms(
+    state: dict[str, Any],
+    *,
+    max_n: int = 3,
+    duration_minutes: int = 60,
+    access_token: str | None = None,
+    snapshot: ComposeCalendarSnapshot | None = None,  # noqa: F821
+    rooms: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    room_list = rooms if rooms is not None else get_rooms()
+    ordered = ordered_rooms_for_state(state, room_list)
+    attendee_count = _attendee_count_for_state(state)
+
+    if snapshot:
         try:
-            start_iso = to_kst_iso(date, time_str)
-            if duration_mode == "custom":
-                end_time = str(state.get("meeting_end_time") or "").strip()
-                end_iso = to_kst_iso(date, end_time)
-            else:
-                end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
-                    minutes=eff_duration
-                )
-                end_iso = end_dt.replace(tzinfo=KST).isoformat()
-            annotated: list[dict[str, Any]] = []
-            resource_ids = [
-                str(r.get("calendar_resource_id") or "").strip()
-                for r in ordered
-                if str(r.get("calendar_resource_id") or "").strip()
-            ]
-            attendee_emails = [
-                str(a.get("email") or "").strip()
-                for a in (state.get("attendees") or [])
-                if str(a.get("email") or "").strip()
-            ]
-            attendee_busy: set[str] = set()
-            attendee_fb_ok = False
-            if attendee_emails and access_token:
-                fb_att = freebusy_query(
-                    calendar_ids=attendee_emails,
-                    time_min=start_iso,
-                    time_max=end_iso,
-                    access_token=access_token,
-                )
-                attendee_fb_ok = fb_att.ok
-                if fb_att.ok:
-                    attendee_busy = _busy_emails_from_freebusy(
-                        fb_att.busy,
-                        attendee_emails=attendee_emails,
-                        time_min_iso=start_iso,
-                        time_max_iso=end_iso,
-                    )
-            partial_attendee_check = bool(attendee_emails) and not attendee_fb_ok
-
-            busy_map: dict[str, list[dict[str, str]]] = {}
-            if resource_ids:
-                fb = freebusy_query(
-                    calendar_ids=resource_ids,
-                    time_min=start_iso,
-                    time_max=end_iso,
-                    access_token=access_token,
-                )
-                if fb.ok:
-                    busy_map = fb.busy
-            group_busy: set[str] = set()
-            group_bookings: list[dict[str, Any]] = []
-            if get_room_calendar_config().get("group_calendar_id"):
-                group_bookings = list_group_room_bookings(
-                    time_min=start_iso,
-                    time_max=end_iso,
-                    access_token=access_token,
-                )
-                group_busy = busy_resource_ids_from_group_bookings(
-                    group_bookings,
-                    ordered,
-                    time_min_iso=start_iso,
-                    time_max_iso=end_iso,
-                )
+            start_iso = snapshot.start_iso
+            end_iso = snapshot.end_iso
+            busy_map = snapshot.room_busy
+            group_bookings = snapshot.group_bookings
+            group_busy = busy_resource_ids_from_group_bookings(
+                group_bookings,
+                ordered,
+                time_min_iso=start_iso,
+                time_max_iso=end_iso,
+            )
             t0 = datetime.fromisoformat(start_iso).astimezone(KST)
             t1 = datetime.fromisoformat(end_iso).astimezone(KST)
 
@@ -307,6 +306,7 @@ def recommend_rooms(
                         return True
                 return False
 
+            annotated: list[dict[str, Any]] = []
             for room in ordered:
                 row = dict(room)
                 rid = str(room.get("calendar_resource_id") or "").strip()
@@ -318,12 +318,91 @@ def recommend_rooms(
                     row["availability"] = "free"
                 row["show_availability"] = True
                 annotated.append(row)
-            annotated.sort(
-                key=lambda r: {"free": 0, "busy": 1}.get(str(r.get("availability")), 0)
-            )
+            _sort_rooms_for_recommendation(annotated, attendee_count=attendee_count)
             ordered = annotated
         except ValueError:
             pass
+    else:
+        date = str(state.get("meeting_date") or "").strip()
+        time_str = str(state.get("meeting_time") or "").strip()
+        duration_mode = str(state.get("duration_mode") or "").strip()
+        eff_duration = _availability_duration_minutes(state, duration_minutes)
+        can_check = bool(date and time_str)
+        if duration_mode == "custom":
+            can_check = can_check and bool(str(state.get("meeting_end_time") or "").strip())
+        if can_check:
+            try:
+                start_iso = to_kst_iso(date, time_str)
+                if duration_mode == "custom":
+                    end_time = str(state.get("meeting_end_time") or "").strip()
+                    end_iso = to_kst_iso(date, end_time)
+                else:
+                    end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
+                        minutes=eff_duration
+                    )
+                    end_iso = end_dt.replace(tzinfo=KST).isoformat()
+                annotated: list[dict[str, Any]] = []
+                resource_ids = [
+                    str(r.get("calendar_resource_id") or "").strip()
+                    for r in ordered
+                    if str(r.get("calendar_resource_id") or "").strip()
+                ]
+
+                busy_map: dict[str, list[dict[str, str]]] = {}
+                if resource_ids:
+                    fb = freebusy_query(
+                        calendar_ids=resource_ids,
+                        time_min=start_iso,
+                        time_max=end_iso,
+                        access_token=access_token,
+                    )
+                    if fb.ok:
+                        busy_map = fb.busy
+                group_busy: set[str] = set()
+                group_bookings: list[dict[str, Any]] = []
+                if get_room_calendar_config().get("group_calendar_id"):
+                    group_bookings = list_group_room_bookings(
+                        time_min=start_iso,
+                        time_max=end_iso,
+                        access_token=access_token,
+                    )
+                    group_busy = busy_resource_ids_from_group_bookings(
+                        group_bookings,
+                        ordered,
+                        time_min_iso=start_iso,
+                        time_max_iso=end_iso,
+                    )
+                t0 = datetime.fromisoformat(start_iso).astimezone(KST)
+                t1 = datetime.fromisoformat(end_iso).astimezone(KST)
+
+                def _busy_at(rid: str) -> bool:
+                    for span in busy_map.get(rid) or []:
+                        s_raw = (span.get("start") or "").replace("Z", "+00:00")
+                        e_raw = (span.get("end") or "").replace("Z", "+00:00")
+                        try:
+                            s = datetime.fromisoformat(s_raw).astimezone(KST)
+                            e = datetime.fromisoformat(e_raw).astimezone(KST)
+                        except ValueError:
+                            continue
+                        if s < t1 and e > t0:
+                            return True
+                    return False
+
+                for room in ordered:
+                    row = dict(room)
+                    rid = str(room.get("calendar_resource_id") or "").strip()
+                    if not rid:
+                        row["availability"] = "unknown"
+                    elif _busy_at(rid) or rid in group_busy:
+                        row["availability"] = "busy"
+                    else:
+                        row["availability"] = "free"
+                    row["show_availability"] = True
+                    annotated.append(row)
+                _sort_rooms_for_recommendation(annotated, attendee_count=attendee_count)
+                ordered = annotated
+            except ValueError:
+                pass
 
     out: list[dict[str, Any]] = []
     for room in ordered[:max_n]:
@@ -349,31 +428,41 @@ def get_group_booking_summary(
     state: dict[str, Any],
     *,
     access_token: str | None = None,
+    snapshot: ComposeCalendarSnapshot | None = None,  # noqa: F821
+    rooms: list[dict[str, Any]] | None = None,
 ) -> str:
     """선택 일시 기준 군산 집계 캘린더 예약 요약."""
-    date = str(state.get("meeting_date") or "").strip()
-    time_str = str(state.get("meeting_time") or "").strip()
-    if not date or not time_str or not get_room_calendar_config().get("group_calendar_id"):
+    if not get_room_calendar_config().get("group_calendar_id"):
         return ""
-    try:
-        duration = int(state.get("duration_minutes") or 60)
-        start_iso = to_kst_iso(date, time_str)
-        end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
-            minutes=duration
+    room_list = rooms if rooms is not None else get_rooms()
+    if snapshot:
+        bookings = snapshot.group_bookings
+        start_iso = snapshot.start_iso
+        end_iso = snapshot.end_iso
+    else:
+        date = str(state.get("meeting_date") or "").strip()
+        time_str = str(state.get("meeting_time") or "").strip()
+        if not date or not time_str:
+            return ""
+        try:
+            duration = int(state.get("duration_minutes") or 60)
+            start_iso = to_kst_iso(date, time_str)
+            end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
+                minutes=duration
+            )
+            end_iso = end_dt.replace(tzinfo=KST).isoformat()
+        except ValueError:
+            return ""
+        bookings = list_group_room_bookings(
+            time_min=start_iso,
+            time_max=end_iso,
+            access_token=access_token,
         )
-        end_iso = end_dt.replace(tzinfo=KST).isoformat()
-    except ValueError:
-        return ""
-    bookings = list_group_room_bookings(
-        time_min=start_iso,
-        time_max=end_iso,
-        access_token=access_token,
-    )
     if not bookings:
         return ""
     return format_group_booking_summary(
         bookings,
-        get_rooms(),
+        room_list,
         time_min_iso=start_iso,
         time_max_iso=end_iso,
     )

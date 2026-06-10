@@ -123,6 +123,75 @@ def test_recommend_rooms_uses_attendee_count():
     assert scored[0][0]["id"] == "b"
 
 
+def test_recommend_rooms_prefers_tight_capacity_fit():
+    from domains.schedule_management.compose_availability import ComposeCalendarSnapshot
+    from domains.schedule_management.rooms import recommend_rooms
+
+    rooms = [
+        {"id": "big", "name": "V-Room", "capacity": 18, "equipment": [], "default_priority": 0},
+        {"id": "mid", "name": "N-Room", "capacity": 12, "equipment": [], "default_priority": 0},
+        {"id": "small", "name": "T-Room", "capacity": 4, "equipment": [], "default_priority": 0},
+    ]
+    state = {
+        "meeting_date": "2026-05-10",
+        "meeting_time": "10:00",
+        "duration_mode": "1h",
+        "attendee_count": 4,
+        "equipment_keywords": [],
+    }
+    snapshot = ComposeCalendarSnapshot(
+        start_iso="2026-05-10T10:00:00+09:00",
+        end_iso="2026-05-10T11:00:00+09:00",
+        room_busy={"big": [], "mid": [], "small": []},
+    )
+    out = recommend_rooms(state, snapshot=snapshot, rooms=rooms)
+    assert [r["id"] for r in out] == ["small", "mid", "big"]
+
+
+def test_recommend_rooms_sorts_free_before_busy_with_capacity():
+    from domains.schedule_management.compose_availability import ComposeCalendarSnapshot
+    from domains.schedule_management.rooms import recommend_rooms
+
+    rooms = [
+        {
+            "id": "busy_small",
+            "name": "T-Room",
+            "capacity": 4,
+            "calendar_resource_id": "busy@resource.calendar.google.com",
+            "equipment": [],
+            "default_priority": 0,
+        },
+        {
+            "id": "free_big",
+            "name": "V-Room",
+            "capacity": 18,
+            "calendar_resource_id": "free@resource.calendar.google.com",
+            "equipment": [],
+            "default_priority": 0,
+        },
+    ]
+    state = {
+        "meeting_date": "2026-05-10",
+        "meeting_time": "10:00",
+        "duration_mode": "1h",
+        "attendee_count": 4,
+        "equipment_keywords": [],
+    }
+    snapshot = ComposeCalendarSnapshot(
+        start_iso="2026-05-10T10:00:00+09:00",
+        end_iso="2026-05-10T11:00:00+09:00",
+        room_busy={
+            "busy@resource.calendar.google.com": [
+                {"start": "2026-05-10T10:00:00+09:00", "end": "2026-05-10T11:00:00+09:00"}
+            ],
+            "free@resource.calendar.google.com": [],
+        },
+    )
+    out = recommend_rooms(state, snapshot=snapshot, rooms=rooms, max_n=2)
+    assert out[0]["id"] == "free_big"
+    assert out[0]["availability"] == "free"
+
+
 def test_get_rooms_fallback_dummy():
     from domains.schedule_management.rooms_store import get_rooms
 
@@ -243,10 +312,11 @@ def test_room_display_line_and_availability_labels():
     rooms = recommend_rooms(state, access_token=None)
     assert rooms
     row = rooms[0]
-    assert "V-Room" in row.get("display_name", row.get("name", ""))
+    assert int(row.get("capacity") or 0) == 4
+    assert "T-Room" in row.get("display_name", row.get("name", ""))
     assert row["display_line"].startswith("수용 ")
     assert "|" in row["display_line"]
-    assert "빔프로젝터" in row["display_line"]
+    assert "모니터" in row["display_line"]
     assert row.get("show_availability")
     assert row["availability_label"] in ("사용 가능", "사용 중")
 
@@ -592,7 +662,7 @@ def test_compose_confirm_dry_run(patch_members, monkeypatch):
         },
         chat_event={"user": {"email": "u@x.com"}},
     )
-    assert out["cardsV2"][0]["cardId"] == "sm_result"
+    assert out["cardsV2"][0]["cardId"] == "sm_booking_confirmed"
     assert "드라이런" in str(out)
 
 
@@ -603,7 +673,10 @@ def test_compose_confirm_calls_create_event(patch_members, monkeypatch):
     monkeypatch.setenv("SCHEDULE_DRY_RUN", "false")
     monkeypatch.setattr("domains.schedule_management.handler.is_dry_run", lambda: False)
 
+    captured: dict[str, Any] = {}
+
     def fake_create(**kwargs):
+        captured.update(kwargs)
         return cc.CalendarResult(
             ok=True,
             created_event={
@@ -631,9 +704,10 @@ def test_compose_confirm_calls_create_event(patch_members, monkeypatch):
         chat_event={"user": {"email": "u@x.com"}},
     )
     text = str(out)
-    assert "예약이 생성되었습니다" in text
+    assert out["cardsV2"][0]["cardId"] == "sm_booking_confirmed"
+    assert "예약이 완료되었습니다" in text
     assert "meet.google.com" in text
-    assert "참석 인원: 8+" in text
+    assert captured.get("send_updates") == "none"
 
 
 def test_parse_capacity_from_room_name():
