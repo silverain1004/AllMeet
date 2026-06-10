@@ -329,6 +329,38 @@ def hello_http(request):
     except Exception:
         path = ""
 
+    if path == "/trigger/weekly-draft-notify":
+        def _run_notify() -> None:
+            try:
+                from domains.weekly_report.auto_notify import send_weekly_draft_to_all
+                result = send_weekly_draft_to_all()
+                logger.info("weekly_draft_notify 완료: %s", result)
+            except Exception:
+                logger.exception("weekly_draft_notify 실패")
+
+        threading.Thread(target=_run_notify, daemon=False).start()
+        return (
+            json.dumps({"status": "accepted"}, ensure_ascii=False),
+            202,
+            {"Content-Type": "application/json; charset=utf-8"},
+        )
+
+    if path == "/trigger/weekly-confluence-reminder":
+        def _run_confluence_reminder() -> None:
+            try:
+                from domains.weekly_report.auto_notify import send_confluence_reminder_to_all
+                result = send_confluence_reminder_to_all()
+                logger.info("weekly_confluence_reminder 완료: %s", result)
+            except Exception:
+                logger.exception("weekly_confluence_reminder 실패")
+
+        threading.Thread(target=_run_confluence_reminder, daemon=False).start()
+        return (
+            json.dumps({"status": "accepted"}, ensure_ascii=False),
+            202,
+            {"Content-Type": "application/json; charset=utf-8"},
+        )
+
     if path == "/trigger/weekly-page":
         body = request.get_json(silent=True) or {}
         team_id = str(body.get("team_id") or "").strip()
@@ -419,6 +451,65 @@ def hello_http(request):
             except Exception:
                 logger.exception("schedule management action failed: invoked_function=%s", invoked_function)
                 reply = {"text": "캘린더 예약 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
+            return (
+                json.dumps(reply, ensure_ascii=False),
+                200,
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
+        if invoked_function and invoked_function.startswith("wr_"):
+            try:
+                user_email = parameters.get("user_email", "")
+                draft_ref_id = parameters.get("draft_ref_id", "")
+                if invoked_function == "wr_insert_to_confluence":
+                    from domains.weekly_report.confluence_insert import handle_insert_to_confluence
+                    reply = handle_insert_to_confluence(
+                        user_email=user_email, draft_ref_id=draft_ref_id
+                    )
+                elif invoked_function == "wr_open_edit_dialog":
+                    from domains.weekly_report.edit_dialog import build_edit_dialog
+                    reply = build_edit_dialog(
+                        draft_ref_id=draft_ref_id, user_email=user_email
+                    )
+                elif invoked_function == "wr_save_and_insert":
+                    from domains.weekly_report.edit_dialog import handle_save_and_insert
+                    space_name = (payload.get("space") or {}).get("name") or ""
+                    reply = handle_save_and_insert(
+                        form_inputs=form_inputs,
+                        user_email=user_email,
+                        draft_ref_id=draft_ref_id,
+                        space_name=space_name,
+                    )
+                else:
+                    reply = {"text": f"알 수 없는 액션입니다: {invoked_function}"}
+            except Exception:
+                logger.exception("weekly report action failed: invoked_function=%s", invoked_function)
+                # dialog-opening / dialog-submit 함수는 반드시 dialog 형식으로 응답해야 한다.
+                # text 형식으로 응답하면 Google Chat 이 "대화상자를 로드하지 못했습니다" 오류를 표시함.
+                if invoked_function in ("wr_open_edit_dialog", "wr_save_and_insert"):
+                    reply = {
+                        "action_response": {
+                            "type": "DIALOG",
+                            "dialog_action": {
+                                "dialog": {
+                                    "body": {
+                                        "sections": [
+                                            {
+                                                "widgets": [
+                                                    {
+                                                        "textParagraph": {
+                                                            "text": "오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        }
+                    }
+                else:
+                    reply = {"text": "초안 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
             return (
                 json.dumps(reply, ensure_ascii=False),
                 200,
