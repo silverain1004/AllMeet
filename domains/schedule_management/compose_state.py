@@ -9,6 +9,8 @@ KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 
 ATTENDEE_COUNT_OPTIONS: tuple[int, ...] = (4, 8, 10, 15)
+BUSINESS_HOUR_START = "08:00"
+BUSINESS_HOUR_END = "19:00"
 _ATT_SEP = "\x1f"
 _PIPE = "|"
 
@@ -38,7 +40,44 @@ def empty_compose_state() -> dict[str, Any]:
         "last_reservation_id": "",
         "last_event_id": "",
         "last_api_calendar_id": "",
+        "ignore_conflict": False,
     }
+
+
+def pick_attendee_count_option(headcount: int) -> int | None:
+    """ATTENDEE_COUNT_OPTIONS 중 headcount 이상 최소값 (예: 2명 → 4)."""
+    n = max(int(headcount), 1)
+    for option in ATTENDEE_COUNT_OPTIONS:
+        if option >= n:
+            return option
+    return None
+
+
+def sync_attendee_count_from_headcount(state: dict[str, Any]) -> None:
+    """attendee_count 미설정 시 참석자 수로 인원 버튼 값 자동 선택."""
+    if state.get("attendee_count") is not None:
+        return
+    n = len(state.get("attendees") or [])
+    if n <= 0:
+        return
+    picked = pick_attendee_count_option(n)
+    if picked is not None:
+        state["attendee_count"] = picked
+
+
+def ready_for_quick_room_preview(state: dict[str, Any]) -> bool:
+    if str(state.get("compose_step") or "quick") != "quick":
+        return True
+    if not str(state.get("meeting_date") or "").strip():
+        return False
+    if not str(state.get("meeting_time") or "").strip():
+        return False
+    if state.get("attendee_count") is None:
+        return False
+    if str(state.get("duration_mode") or "") == "custom":
+        if not str(state.get("meeting_end_time") or "").strip():
+            return False
+    return True
 
 
 def serialize_attendees(attendees: list[dict[str, str]]) -> str:
@@ -67,6 +106,22 @@ def deserialize_attendees(pipe: str) -> list[dict[str, str]]:
     return out
 
 
+def attendee_emails_for_event(state: dict[str, Any], booker_email: str) -> list[str]:
+    """이벤트 참석자 이메일 — 예약자 본인을 항상 포함."""
+    emails: list[str] = []
+    seen: set[str] = set()
+    booker = str(booker_email or "").strip()
+    if booker:
+        emails.append(booker)
+        seen.add(booker.lower())
+    for a in state.get("attendees") or []:
+        e = str(a.get("email") or "").strip()
+        if e and e.lower() not in seen:
+            emails.append(e)
+            seen.add(e.lower())
+    return emails
+
+
 def state_to_button_params(state: dict[str, Any]) -> dict[str, str]:
     ac = state.get("attendee_count")
     return {
@@ -90,6 +145,7 @@ def state_to_button_params(state: dict[str, Any]) -> dict[str, str]:
         "last_reservation_id": str(state.get("last_reservation_id") or ""),
         "last_event_id": str(state.get("last_event_id") or ""),
         "last_api_calendar_id": str(state.get("last_api_calendar_id") or ""),
+        "ignore_conflict": "1" if state.get("ignore_conflict") else "",
     }
 
 
@@ -156,6 +212,7 @@ def compose_state_from(
     state["last_reservation_id"] = parameters.get("last_reservation_id", "")
     state["last_event_id"] = parameters.get("last_event_id", "")
     state["last_api_calendar_id"] = parameters.get("last_api_calendar_id", "")
+    state["ignore_conflict"] = parameters.get("ignore_conflict", "") in ("1", "true", "yes")
     state["picked_room_id"] = parameters.get("picked_room_id", "")
     state["picked_room_name"] = parameters.get("picked_room_name", "")
     pipe = parameters.get("attendees_pipe", "")

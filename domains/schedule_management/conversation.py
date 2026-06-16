@@ -7,7 +7,11 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from domains.schedule_management.compose_state import empty_compose_state
+from domains.schedule_management.compose_state import (
+    BUSINESS_HOUR_END,
+    BUSINESS_HOUR_START,
+    empty_compose_state,
+)
 
 KST = timezone(timedelta(hours=9))
 
@@ -48,16 +52,61 @@ def _extract_date(text: str, now: datetime) -> str:
     return ""
 
 
+def _hhmm_to_minutes(hhmm: str) -> int:
+    h, m = map(int, hhmm.split(":"))
+    return h * 60 + m
+
+
+def _format_hhmm(h: int, minute: int) -> str:
+    return f"{h:02d}:{minute:02d}"
+
+
+def _is_within_business_hours(hhmm: str) -> bool:
+    t = _hhmm_to_minutes(hhmm)
+    return _hhmm_to_minutes(BUSINESS_HOUR_START) <= t <= _hhmm_to_minutes(BUSINESS_HOUR_END)
+
+
+def _ambiguous_hour_candidates(h: int, minute: int) -> list[str]:
+    if not (0 <= h < 24):
+        return []
+    candidates = [_format_hhmm(h, minute)]
+    if 1 <= h <= 11:
+        candidates.append(_format_hhmm(h + 12, minute))
+    return candidates
+
+
+def _pick_business_hours_time(h: int, minute: int) -> str:
+    matches = [c for c in _ambiguous_hour_candidates(h, minute) if _is_within_business_hours(c)]
+    if len(matches) == 1:
+        return matches[0]
+    return ""
+
+
 def _extract_time(text: str) -> str:
     m = re.search(r"(\d{1,2}):(\d{2})", text)
     if m:
         return f"{int(m.group(1)):02d}:{m.group(2)}"
-    m = re.search(r"오전\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", text)
+    m = re.search(r"오전\s*(\d{1,2})\s*시\s*반", text)
+    if m:
+        h = int(m.group(1))
+        return f"{h:02d}:30"
+    m = re.search(r"오후\s*(\d{1,2})\s*시\s*반", text)
+    if m:
+        h = int(m.group(1))
+        if h < 12:
+            h += 12
+        return f"{h:02d}:30"
+    m = re.search(r"(\d{1,2})\s*시\s*반", text)
+    if m:
+        h = int(m.group(1))
+        if 0 <= h < 24:
+            return _pick_business_hours_time(h, 30)
+    m = re.search(r"오전\s*(\d{1,2})\s*시(?!간)(?:\s*(\d{1,2})\s*분)?", text)
     if m:
         h = int(m.group(1))
         minute = int(m.group(2) or 0)
         return f"{h:02d}:{minute:02d}"
-    m = re.search(r"오후\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", text)
+    m = re.search(r"오후\s*(\d{1,2})\s*시(?!간)(?:\s*(\d{1,2})\s*분)?", text)
     if m:
         h = int(m.group(1))
         if h < 12:
@@ -66,12 +115,12 @@ def _extract_time(text: str) -> str:
         return f"{h:02d}:{minute:02d}"
     if "오후" in text and not re.search(r"오후\s*\d", text):
         return "14:00"
-    m = re.search(r"(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", text)
+    m = re.search(r"(\d{1,2})\s*시(?!간)(?:\s*(\d{1,2})\s*분)?", text)
     if m:
         h = int(m.group(1))
         minute = int(m.group(2) or 0)
-        if 0 < h < 24:
-            return f"{h:02d}:{minute:02d}"
+        if 0 <= h < 24:
+            return _pick_business_hours_time(h, minute)
     return ""
 
 

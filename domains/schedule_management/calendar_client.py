@@ -398,6 +398,7 @@ def patch_event(
     attendees: list[str] | None = None,
     resource_emails: list[str] | None = None,
     time_zone: str = "Asia/Seoul",
+    send_updates: str = "none",
     access_token: str | None = None,
 ) -> CalendarResult:
     if is_dry_run():
@@ -419,9 +420,11 @@ def patch_event(
             body["attendees"] = merged
     if not body:
         return CalendarResult(ok=False, error_kind="event_field_missing")
+    params = urllib.parse.urlencode({"sendUpdates": send_updates})
     url = (
         "https://www.googleapis.com/calendar/v3/calendars/"
         f"{urllib.parse.quote(calendar_id, safe='')}/events/{urllib.parse.quote(event_id, safe='')}"
+        f"?{params}"
     )
     data, err = _request(
         url=url, method="PATCH", write=True, body=body, access_token=access_token
