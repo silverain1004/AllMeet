@@ -96,11 +96,13 @@ def test_hm_weekly_draft_runs_when_linked():
     assert out is draft_card
 
 
-def test_build_settings_hub_has_oauth_and_home():
-    from domains.daily_chat.home_menu import build_settings_hub_card
+def test_build_settings_hub_has_three_branches():
+    from domains.settings.cards import build_settings_hub_card
 
     card = build_settings_hub_card()
     buttons = _home_buttons(card)
     functions = [b["onClick"]["action"]["function"] for b in buttons]
-    assert "wm_oauth_link" in functions
+    assert "st_open_personal" in functions
+    assert "st_open_team" in functions
+    assert "st_open_rooms" in functions
     assert "hm_open_menu" in functions

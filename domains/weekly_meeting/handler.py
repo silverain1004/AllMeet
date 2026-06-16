@@ -186,7 +186,7 @@ def handle_settings_request(
     user_message: str, chat_event: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """'설정' 키워드 진입 — 설정 허브 카드."""
-    from domains.daily_chat.home_menu import build_settings_hub_card
+    from domains.settings.cards import build_settings_hub_card
 
     _ = user_message
     return build_settings_hub_card()
@@ -209,7 +209,24 @@ def handle_weekly_meeting_action(
     user_context = _user_context(chat_event)
     space_id = _space_id(chat_event)
 
-    # 메인 분기
+    # 메인 분기 — 구 메뉴는 설정 트리로 리다이렉트
+    _legacy_to_settings = {
+        "wm_open_team_menu",
+        "wm_open_member_menu",
+        "wm_open_conf_menu",
+        "wm_open_schedule_menu",
+        "wm_open_scheduler",
+    }
+    if invoked_function in _legacy_to_settings:
+        from domains.settings.handler import handle_settings_action
+
+        return handle_settings_action(
+            invoked_function="st_open_team",
+            parameters=parameters,
+            form_inputs=form_inputs,
+            chat_event=chat_event,
+        )
+
     if invoked_function == "wm_open_menu":
         return build_weekly_meeting_menu_card(include_action_response=True)
     if invoked_function == "wm_open_schedule_menu":

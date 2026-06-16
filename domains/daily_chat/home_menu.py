@@ -152,37 +152,10 @@ def build_home_menu_card(
 
 
 def build_settings_hub_card(*, include_action_response: bool = False) -> dict[str, Any]:
-    """팀·컨플루언스·캘린더·OAuth 등 설정 진입 허브."""
-    widgets: list[dict[str, Any]] = [
-        {
-            "textParagraph": {
-                "text": "<b>설정</b><br>팀·데이터 연결·캘린더·회의실 관련 설정을 선택해 주세요."
-            }
-        },
-        {
-            "buttonList": {
-                "buttons": [
-                    _action_button("🔗 내 데이터 연결", "wm_oauth_link"),
-                    _action_button("팀 설정", "wm_open_team_menu"),
-                    _action_button("팀원 설정", "wm_open_member_menu"),
-                    _action_button("컨플루언스 설정", "wm_open_conf_menu"),
-                    _action_button("주간회의 일정", "wm_open_schedule_menu"),
-                    _action_button("스케줄러", "wm_open_scheduler"),
-                    _action_button("캘린더·예약 설정", "sm_open_settings"),
-                    _action_button("회의실 동기화", "sm_sync_rooms"),
-                    _action_button("홈으로", "hm_open_menu"),
-                ]
-            }
-        },
-    ]
-    out = _wrap_card(
-        "hm_settings_hub",
-        {"title": "AllMeet", "subtitle": "설정"},
-        widgets,
-        include_action_response=include_action_response,
-    )
-    out["text"] = "설정 메뉴입니다."
-    return out
+    """설정 허브 — domains.settings 로 위임."""
+    from domains.settings.cards import build_settings_hub_card as _build
+
+    return _build(include_action_response=include_action_response)
 
 
 def build_oauth_required_card(
