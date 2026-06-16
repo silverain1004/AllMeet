@@ -304,21 +304,41 @@ def handle_weekly_meeting_action(
             lines = [f"{team_name} 팀원 휴가일정이 없습니다."]
         return build_schedule_result_card(title, lines, include_action_response=True)
 
+    if invoked_function == "wm_schedule_load_calendar_id":
+        team_id = _safe_team_id(form_inputs)
+        existing, _ = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        return build_schedule_calendar_id_card(
+            get_team_list(),
+            include_action_response=True,
+            selected_team_id=team_id,
+            current_calendar_id=str(existing.get("calendar_id") or ""),
+            current_vacation_calendar_id=str(existing.get("vacation_calendar_id") or ""),
+        )
+
     if invoked_function == "wm_schedule_save_calendar_id":
         team_id = _safe_team_id(form_inputs)
         existing, team_name = _team_required(team_id)
         if not existing:
             return {"text": "팀을 선택해 주세요."}
         calendar_id = _safe_form_value(form_inputs, "calendar_id")
-        if not calendar_id:
-            return {"text": "Calendar ID를 입력해 주세요."}
+        vacation_calendar_id = _safe_form_value(form_inputs, "vacation_calendar_id")
+        if not calendar_id and not vacation_calendar_id:
+            return {"text": "Calendar ID를 하나 이상 입력해 주세요."}
         update_team_calendar_id(
             team_id=team_id,
             calendar_id=calendar_id,
+            vacation_calendar_id=vacation_calendar_id,
             space_id=space_id,
             user_context=user_context,
         )
-        return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ {team_name} 팀 Calendar ID가 저장되었습니다: {calendar_id}"}
+        parts = []
+        if calendar_id:
+            parts.append(f"주간회의: {calendar_id}")
+        if vacation_calendar_id:
+            parts.append(f"휴가: {vacation_calendar_id}")
+        return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ {team_name} 팀 Calendar ID 저장: {' / '.join(parts)}"}
 
     if invoked_function == "wm_schedule_open_drive_ids":
         return build_schedule_drive_ids_card(get_team_list(), include_action_response=True)

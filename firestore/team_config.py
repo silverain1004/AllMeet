@@ -21,6 +21,7 @@ TEAM_ROW_FIXED_FIELDS = {
     "id",
     "name",
     "calendar_id",
+    "vacation_calendar_id",
     "space_key",
     "confluence_space_key",
     "report_root_page_id",
@@ -31,6 +32,7 @@ TEAM_ROW_FIXED_FIELDS = {
 }
 TEAM_SETTING_FIELDS = {
     "calendar_id",
+    "vacation_calendar_id",
     "confluence_space_key",
     "report_root_page_id",
     "space_key",
@@ -154,6 +156,7 @@ def _empty_team_row(team_id: str, team_name: str) -> dict[str, Any]:
         "id": team_id,
         "name": (team_name or team_id).strip() or team_id,
         "calendar_id": "",
+        "vacation_calendar_id": "",
         "space_key": "",
         "confluence_space_key": "",
         "report_root_page_id": "",
@@ -177,7 +180,7 @@ def _normalize_team_row(row: dict[str, Any], *, team_id: str, team_name: str) ->
         if isinstance(base.get("shared_drive_ids"), list)
         else []
     )
-    for key in ("calendar_id", "space_key", "confluence_space_key", "report_root_page_id", "template_page_url", "template_page_id"):
+    for key in ("calendar_id", "vacation_calendar_id", "space_key", "confluence_space_key", "report_root_page_id", "template_page_url", "template_page_id"):
         base[key] = str(base.get(key) or "").strip()
     return base
 
@@ -481,6 +484,7 @@ def update_team_calendar_id(
     *,
     team_id: str,
     calendar_id: str,
+    vacation_calendar_id: str = "",
     space_id: str,
     user_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -490,12 +494,17 @@ def update_team_calendar_id(
     if not existing:
         raise ValueError("존재하지 않는 팀입니다.")
     team_name = str(existing.get("team_name") or team_id)
+    updates: dict[str, Any] = {}
+    if calendar_id:
+        updates["calendar_id"] = calendar_id.strip()
+    if vacation_calendar_id:
+        updates["vacation_calendar_id"] = vacation_calendar_id.strip()
     return upsert_team_config(
         team_id=team_id,
         team_name=team_name,
         space_id=space_id,
         user_context=user_context,
-        updates={"calendar_id": (calendar_id or "").strip()},
+        updates=updates,
     )
 
 

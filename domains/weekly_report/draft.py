@@ -145,7 +145,10 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
         user_display_name, user_email, meeting_date_str, _filter_for_draft(raw)
     )
 
-    # 7. 카드 빌드
+    # 7. 초안 Firestore 임시 저장 (버튼 파라미터 크기 제한 회피용).
+    draft_ref_id = _save_weekly_draft(user_email=user_email, draft=draft)
+
+    # 8. 카드 빌드
     return build_draft_card(
         user_name=user_display_name,
         user_email=user_email,
@@ -154,6 +157,7 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
         raw=raw,
         draft=draft,
         errors=errors,
+        draft_ref_id=draft_ref_id,
     )
 
 
@@ -632,6 +636,32 @@ def _vertex_analyze(
         return json.loads(text)
     except Exception as e:
         logger.warning("Vertex 분석 실패, raw 만 카드로 표시: %s", e)
+        return None
+
+
+# 함수 — Firestore weekly_drafts 임시 저장.
+def _save_weekly_draft(*, user_email: str, draft: dict | None) -> str | None:
+    """초안을 Firestore weekly_drafts/{email} 에 7일 TTL 로 저장 → draft_ref_id 반환."""
+    if not draft:
+        return None
+    try:
+        from datetime import timezone
+
+        from firestore import get_client
+
+        db = get_client()
+        expire_at = datetime.now(timezone.utc) + timedelta(days=7)
+        db.collection("weekly_drafts").document(user_email).set(
+            {
+                "draft": draft,
+                "user_email": user_email,
+                "created_at": datetime.now(timezone.utc),
+                "expire_at": expire_at,
+            }
+        )
+        return user_email
+    except Exception as e:
+        logger.warning("weekly_draft Firestore 저장 실패: %s", e)
         return None
 
 
