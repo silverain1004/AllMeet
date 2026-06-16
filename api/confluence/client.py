@@ -55,6 +55,14 @@ class ConfluenceClient:
         page = self.get_page(page_id, expand="body.storage")
         return ((page.get("body") or {}).get("storage") or {}).get("value") or ""
 
+    def list_page_versions(self, page_id: str, limit: int = 50) -> list[dict]:
+        """페이지 버전이력. 각 항목: {number, when, by: {accountId, displayName}}"""
+        url = f"{self._api_url}/{page_id}/version"
+        res = requests.get(url, params={"limit": limit}, headers=self._headers())
+        if res.status_code != 200:
+            raise RuntimeError(f"버전이력 조회 실패: {res.status_code} — {res.text[:300]}")
+        return res.json().get("results", [])
+
     def get_child_pages(self, parent_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """부모 페이지의 자식 페이지 목록 (v1 child API)."""
         url = f"{self._api_url}/{parent_id}/child/page"

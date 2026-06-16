@@ -46,6 +46,7 @@ def build_draft_card(
     raw: dict[str, Any],
     draft: dict[str, Any] | None,
     errors: dict[str, str],
+    draft_ref_id: str | None = None,
 ) -> dict[str, Any]:
     """수집·분석 결과 통합 카드.
 
@@ -163,6 +164,46 @@ def build_draft_card(
             }
         )
 
+    # Confluence 삽입 / 수정 버튼 — draft 가 있고 Firestore 저장 성공 시에만 표시.
+    if draft and draft_ref_id:
+        sections.append(
+            {
+                "widgets": [
+                    {
+                        "buttonList": {
+                            "buttons": [
+                                {
+                                    "text": "Confluence에 그대로 삽입",
+                                    "onClick": {
+                                        "action": {
+                                            "function": "wr_insert_to_confluence",
+                                            "parameters": [
+                                                {"key": "user_email", "value": user_email},
+                                                {"key": "draft_ref_id", "value": draft_ref_id},
+                                            ],
+                                        }
+                                    },
+                                },
+                                {
+                                    "text": "초안 수정 후 삽입",
+                                    "onClick": {
+                                        "action": {
+                                            "function": "wr_open_edit_dialog",
+                                            "interaction": "OPEN_DIALOG",
+                                            "parameters": [
+                                                {"key": "user_email", "value": user_email},
+                                                {"key": "draft_ref_id", "value": draft_ref_id},
+                                            ],
+                                        }
+                                    },
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
     return {
         "cardsV2": [
             {
@@ -207,7 +248,13 @@ def _render_draft_body(draft: dict[str, Any]) -> str:
             task = str(it.get("task") or "").strip()
             if not task:
                 continue
-            task_lines = [f"- {_format_task_with_progress(task)}"]
+            deadline = str(it.get("deadline") or "").strip()
+            task_badge = _format_task_with_progress(task)
+            if deadline:
+                task_badge += (
+                    f'&nbsp;&nbsp;<font color="#c62828"><b>📅 {html.escape(deadline)}</b></font>'
+                )
+            task_lines = [f"- {task_badge}"]
             for d in it.get("details") or []:
                 detail = str(d or "").strip()
                 if not detail:
@@ -221,17 +268,23 @@ def _render_draft_body(draft: dict[str, Any]) -> str:
 
 
 def _format_task_with_progress(task: str) -> str:
-    """task 끝의 ' -%' / ' 100%' 진행률을 색상·볼드로 분리 강조.
+    """task 끝의 ' -%' / ' 100%' 진행률을 색상·볼드 배지로 강조.
 
     매치 없으면 task 전체를 escape 만 해서 반환.
+    배지 형식: [ -% ] / [ X% ] / [ 100% ] — 괄호로 뱃지 느낌.
     """
     m = _PROGRESS_SUFFIX_RE.search(task)
     if not m:
         return html.escape(task)
     head = task[: m.start()].rstrip()
     prog = m.group(1)
-    color = "#9aa0a6" if prog == "-%" else "#1e8e3e"  # 회색 / 녹색
-    return f"{html.escape(head)} <font color=\"{color}\"><b>{prog}</b></font>"
+    if prog == "-%":
+        color = "#9aa0a6"  # 회색 — 미입력
+    elif prog == "100%":
+        color = "#1e8e3e"  # 녹색 — 완료
+    else:
+        color = "#f29900"  # 주황 — 진행 중
+    return f'{html.escape(head)} <font color="{color}"><b>[ {prog} ]</b></font>'
 
 
 def _service_widget(
