@@ -2,16 +2,71 @@
 
 PLAN.md §5.1 `scoring.py`.
 
-소스·역할별 가중치 × 최근성 가중. 한 사람·한 소스당 최대 10 hit cap (노이즈 폭증 방지).
+소스·역할별 가중치 × 최근성 가중 × 키워드 관련성 가중.
+hit_score = role_weight × recency_factor × relevance_factor
+한 사람·한 소스당 최대 5 hit cap (노이즈 폭증 방지).
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Vertex AI 텍스트 임베딩 — 키워드 ↔ 문서 제목 코사인 유사도 계산용.
+_EMBEDDING_MODEL_NAME = "text-multilingual-embedding-002"
+_emb_lock = threading.Lock()
+_emb_model = None
+
+
+def _get_emb_model():
+    global _emb_model
+    if _emb_model is not None:
+        return _emb_model
+    with _emb_lock:
+        if _emb_model is not None:
+            return _emb_model
+        import vertexai
+        from vertexai.language_models import TextEmbeddingModel
+
+        from config.settings import LOCATION, PROJECT_ID
+
+        vertexai.init(project=PROJECT_ID, location=LOCATION)
+        _emb_model = TextEmbeddingModel.from_pretrained(_EMBEDDING_MODEL_NAME)
+    return _emb_model
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(x * x for x in b))
+    return dot / norm if norm > 0 else 0.0
+
+
+def _compute_title_similarities(keyword: str, titles: list[str]) -> dict[str, float]:
+    """키워드와 제목 목록의 코사인 유사도 계산. 실패 시 빈 dict 반환 → 호출 측이 1.0으로 폴백."""
+    unique_titles = list({t for t in titles if t})
+    if not keyword or not unique_titles:
+        return {}
+    try:
+        model = _get_emb_model()
+        kw_vec = model.get_embeddings([keyword], task_type="RETRIEVAL_QUERY")[0].values
+        title_vecs = model.get_embeddings(unique_titles, task_type="RETRIEVAL_DOCUMENT")
+        return {t: _cosine_sim(kw_vec, tv.values) for t, tv in zip(unique_titles, title_vecs)}
+    except Exception as e:
+        logger.warning("expert_finder embedding 유사도 실패 (폴백 1.0): %s", e)
+        return {}
+
+
+def _relevance_factor(similarity: float) -> float:
+    """코사인 유사도(0~1) → 가중치 승수.
+    선형 매핑: sim 0.0 → 0.3 (관련 없음 패널티), sim 1.0 → 1.5 (관련성 높음 부스트).
+    """
+    return 0.3 + similarity * 1.2
+
 
 # (source, role) → base_weight. 누락 키는 1.0 (그 외 카테고리).
 _ROLE_WEIGHTS: dict[tuple[str, str], float] = {
@@ -32,11 +87,12 @@ _DEFAULT_WEIGHT = 1.0
 _PER_SOURCE_CAP = 5
 
 
-def score_candidates(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def score_candidates(hits: list[dict[str, Any]], keyword: str = "") -> list[dict[str, Any]]:
     """hit 리스트 → 후보별 집계 dict 리스트 (점수 내림차순).
 
     Args:
         hits: ``search_public`` 의 hit 리스트.
+        keyword: 검색 키워드. 제공 시 제목 임베딩 유사도를 점수에 반영.
 
     Returns:
         ``[{
@@ -50,6 +106,12 @@ def score_candidates(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not hits:
         return []
 
+    # 키워드 ↔ 제목 유사도 일괄 계산 (실패 시 빈 dict → relevance=1.0 폴백).
+    title_sim: dict[str, float] = {}
+    if keyword:
+        titles = [h.get("title") or "" for h in hits]
+        title_sim = _compute_title_similarities(keyword, titles)
+
     by_email: dict[str, dict[str, Any]] = {}
     # 같은 사람·같은 소스 hit 카운트 (cap 적용용)
     source_count: dict[tuple[str, str], int] = {}
@@ -62,7 +124,9 @@ def score_candidates(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue  # 신원 미해석 hit 은 스코어링에서 제외
         weight = _ROLE_WEIGHTS.get((h.get("source") or "", h.get("role") or ""), _DEFAULT_WEIGHT)
         recency = _recency_factor(h.get("when") or "")
-        hit_score = weight * recency
+        title = h.get("title") or ""
+        relevance = _relevance_factor(title_sim[title]) if title in title_sim else 1.0
+        hit_score = weight * recency * relevance
         enriched.append((hit_score, h))
 
     enriched.sort(key=lambda x: x[0], reverse=True)

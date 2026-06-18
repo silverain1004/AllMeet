@@ -128,7 +128,7 @@ def _build_result_card(keyword: str, requester_email: str = "") -> dict[str, Any
         return build_all_failed_card()
 
     all_hits = list(public_hits) + list(private_hits)
-    scored = score_candidates(all_hits)
+    scored = score_candidates(all_hits, keyword=keyword)
     scored = _exclude_requester(scored, requester_email)
     annotate_with_consent(scored, consenting)
 
