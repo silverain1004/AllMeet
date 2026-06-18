@@ -420,11 +420,17 @@ def _build_vacation_map(
 # ---------------------------------------------------------------------------
 
 def _find_reference_date(calendar_id: str, team_name: str) -> datetime:
-    """다음 주간회의 일자. 캘린더 조회 실패 시 오늘 +7일."""
+    """오늘 이후의 다음 주간회의 일자. 캘린더 조회 실패 시 오늘 +7일.
+
+    오늘이 회의 날짜면 이미 회의가 끝난 것으로 보고 다음 회의(다음 주)를 기준일로 잡는다.
+    회의 시각(시:분)에 영향받지 않도록 날짜 경계로 조회하고 날짜 단위로 비교한다.
+    """
     try:
         from api.calendar.events import list_events
         now = datetime.utcnow()
-        time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # 회의 종료 시각 기준 필터(timeMin)에 흔들리지 않도록 오늘 0시부터 조회하고,
+        # '오늘 이후' 판정은 아래 날짜 비교로 처리한다.
+        time_min = now.strftime("%Y-%m-%dT00:00:00Z")
         time_max = (now + timedelta(days=14)).strftime("%Y-%m-%dT23:59:59Z")
         result = list_events(
             calendar_id=calendar_id,
@@ -443,7 +449,8 @@ def _find_reference_date(calendar_id: str, team_name: str) -> datetime:
                 )
                 if date_str:
                     d = datetime.strptime(date_str, "%Y-%m-%d")
-                    if d.date() >= local_now.date():
+                    # 오늘 회의는 끝난 것으로 보고 건너뛴다 (> : 오늘 이후만)
+                    if d.date() > local_now.date():
                         return d
     except Exception as e:
         logger.warning("캘린더 회의일 조회 실패: %s", e)
