@@ -385,6 +385,23 @@ def hello_http(request):
             202,
             {"Content-Type": "application/json; charset=utf-8"},
         )
+
+    if path == "/trigger/daily-briefing":
+        def _run_daily_briefing() -> None:
+            try:
+                from domains.daily_brief.auto_notify import send_daily_briefing_to_all
+                result = send_daily_briefing_to_all()
+                logger.info("daily_briefing 완료: %s", result)
+            except Exception:
+                logger.exception("daily_briefing 실패")
+
+        threading.Thread(target=_run_daily_briefing, daemon=False).start()
+        return (
+            json.dumps({"status": "accepted"}, ensure_ascii=False),
+            202,
+            {"Content-Type": "application/json; charset=utf-8"},
+        )
+
     # ------------------------------------------------------------------
 
     payload = request.get_json(silent=True)

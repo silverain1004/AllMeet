@@ -218,6 +218,48 @@ def list_messages_by_query(
     return ListMessagesResult(ok=True, messages=messages)
 
 
+def get_message_body(*, message_id: str, user_email: str, max_chars: int = 1000) -> str:
+    """Gmail 메시지 본문 (text/plain) 앞 max_chars 자 반환. 실패 시 빈 문자열."""
+    from api._auth.user_oauth import AuthRequiredError, get_user_credentials
+
+    try:
+        creds = get_user_credentials(user_email, [_SCOPE])
+    except AuthRequiredError:
+        return ""
+
+    url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}?format=full"
+    headers = {"Authorization": f"Bearer {creds.token}", "Accept": "application/json"}
+    try:
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("gmail get_message_body %s 실패: %s", message_id, e)
+        return ""
+
+    return _extract_text_body(data.get("payload") or {}, max_chars)
+
+
+def _extract_text_body(payload: dict[str, Any], max_chars: int) -> str:
+    """payload 에서 text/plain 파트를 재귀 탐색해 base64url 디코드 후 반환."""
+    import base64
+
+    mime = payload.get("mimeType", "")
+    body_data = (payload.get("body") or {}).get("data", "")
+    if mime == "text/plain" and body_data:
+        try:
+            text = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="replace")
+            return text[:max_chars]
+        except Exception:
+            return ""
+
+    for part in payload.get("parts") or []:
+        result = _extract_text_body(part, max_chars)
+        if result:
+            return result
+    return ""
+
+
 def _to_gmail_date(iso: str) -> str:
     """ISO8601 → ``YYYY/MM/DD`` (Gmail q 검색 포맷)."""
     return (iso or "")[:10].replace("-", "/")
