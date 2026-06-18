@@ -107,8 +107,8 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
     )
     confluence_fallback_names = _confluence_fallback_names(team_id, user_email)
 
-    # 2. 주간회의 일자 (KST 기준 ±30일 검색)
-    meeting_date_dt = _find_meeting_date_for_team(calendar_id)
+    # 2. 주간회의 일자 (KST 기준 ±30일 검색) — 공유 캘린더라 본인 팀 회의로 좁힌다.
+    meeting_date_dt = _find_meeting_date_for_team(calendar_id, team_name)
 
     meeting_date_str = meeting_date_dt.strftime("%Y-%m-%d (%a)")
 
@@ -161,8 +161,12 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
     )
 
 
-def _find_meeting_date_for_team(calendar_id: str) -> datetime:
-    """팀 캘린더에서 '주간회의' 검색 → 가장 가까운 일자. 없으면 폴백."""
+def _find_meeting_date_for_team(calendar_id: str, team_name: str = "") -> datetime:
+    """팀 캘린더에서 본인 팀 '주간회의' 검색 → 가장 가까운 일자. 없으면 폴백.
+
+    공유 캘린더에는 여러 팀의 주간회의가 섞여 있어 ``team_name`` 으로 제목을 좁힌다.
+    좁히지 않으면 가장 가까운 *남의 팀* 회의 일자가 찍힌다.
+    """
     if not calendar_id:
         return fallback_meeting_date_kst()
     now = kst_now()
@@ -176,7 +180,7 @@ def _find_meeting_date_for_team(calendar_id: str) -> datetime:
         q="주간회의",
     )
     if res.ok and res.events:
-        found = find_meeting_date(res.events, reference=now)
+        found = find_meeting_date(res.events, reference=now, team_name=team_name)
         if found is not None:
             return found
     return fallback_meeting_date_kst(now)
