@@ -114,6 +114,10 @@ def handle_oauth_callback(request: Any) -> tuple[str, int, dict[str, str]]:
         refresh_token=refresh_token,
         scopes=token_data.get("scope", "").split() or SCOPES,
     )
+    # 재동의면 새 refresh_token 으로 옛 access_token 이 폐기됨 — 이 인스턴스 캐시 즉시 제거.
+    from api._auth.user_oauth import invalidate_cache
+
+    invalidate_cache(user_email)
     synced = sync_oauth_status(user_email=user_email, status="linked")
     logger.info("OAuth 연결 완료: %s (sync=%d teams)", user_email, synced)
 

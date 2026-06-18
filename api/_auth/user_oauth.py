@@ -28,6 +28,19 @@ def _cache_key(user_email: str, scopes: list[str]) -> tuple[str, tuple[str, ...]
     return (user_email, tuple(sorted(scopes)))
 
 
+def invalidate_cache(user_email: str) -> None:
+    """해당 사용자의 모든 scope 캐시 제거. 재동의/권한철회 직후 호출 — 옛 access_token 즉시 폐기.
+
+    이 인스턴스 한정(인메모리). 타 인스턴스는 ``get_user_credentials`` 의 refresh_token 대조로 무효화됨.
+    """
+    if not user_email:
+        return
+    with _lock:
+        for k in list(_creds_cache.keys()):
+            if k[0] == user_email:
+                _creds_cache.pop(k, None)
+
+
 class AuthRequiredError(Exception):
     """OAuth 미동의/만료/폐기 — 사용자에게 재동의 안내 필요."""
 
@@ -47,12 +60,11 @@ def get_user_credentials(user_email: str, scopes: list[str]) -> Credentials:
     if not user_email:
         raise AuthRequiredError("", reason="empty_email")
 
-    key = _cache_key(user_email, scopes)
-    with _lock:
-        cached = _creds_cache.get(key)
-    if cached is not None and cached.valid:
-        return cached
-
+    # 캐시 히트라도 Firestore 의 refresh_token 과 대조 후 사용. 재동의(prompt=consent)로
+    # 새 refresh_token 이 저장되면 옛 access_token 은 서버에서 폐기되므로, 만료 전이라
+    # `cached.valid` 만 믿고 쓰면 죽은 토큰으로 401 이 난다. record 를 먼저 읽어 토큰
+    # 버전이 바뀌었는지 본다 (멀티 인스턴스 포함 — 다른 인스턴스가 재동의를 처리해도
+    # Firestore 가 단일 진실원이라 다음 호출에서 자동 무효화됨).
     record = get_token(user_email)
     if not record:
         raise AuthRequiredError(user_email, reason="no_token")
@@ -62,6 +74,12 @@ def get_user_credentials(user_email: str, scopes: list[str]) -> Credentials:
     refresh_token = record.get("refresh_token")
     if not refresh_token:
         raise AuthRequiredError(user_email, reason="no_refresh_token")
+
+    key = _cache_key(user_email, scopes)
+    with _lock:
+        cached = _creds_cache.get(key)
+    if cached is not None and cached.valid and cached.refresh_token == refresh_token:
+        return cached
 
     if not (OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET):
         raise AuthRequiredError(user_email, reason="oauth_client_not_configured")
