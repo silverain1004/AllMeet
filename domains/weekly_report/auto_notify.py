@@ -11,11 +11,14 @@ Cloud Scheduler 트리거:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_PARALLEL_WORKERS = 10
 
 _CONVERSATIONS_COLLECTION = "conversations"
 _CONFIG_COLLECTION = "config"
@@ -34,13 +37,37 @@ def send_weekly_draft_to_all() -> dict[str, Any]:
     result: dict[str, list[str]] = {
         "sent": [], "skipped_no_meeting": [], "skipped_no_space": [], "skipped_error": [],
     }
-    for team in teams:
-        if not is_weekly_meeting_next_workday(team["calendar_id"]):
-            result["skipped_no_meeting"].append(team["team_id"])
-            continue
-        for m in team["members"]:
-            status = _send_draft_to_user(user_email=m["email"], user_display_name=m["name"])
-            result[status].append(m["email"])
+
+    # 팀별 캘린더 체크 병렬
+    eligible_members: list[dict[str, str]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as ex:
+        cal_futures = {ex.submit(is_weekly_meeting_next_workday, t["calendar_id"]): t for t in teams}
+        for fut in concurrent.futures.as_completed(cal_futures):
+            team = cal_futures[fut]
+            try:
+                has_meeting = fut.result()
+            except Exception as e:
+                logger.warning("[auto_notify] 캘린더 체크 예외 team=%s: %s", team["team_id"], e)
+                has_meeting = False
+            if has_meeting:
+                eligible_members.extend(team["members"])
+            else:
+                result["skipped_no_meeting"].append(team["team_id"])
+
+    # 유저별 DM 발송 병렬
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as ex:
+        send_futures = {
+            ex.submit(_send_draft_to_user, user_email=m["email"], user_display_name=m["name"]): m["email"]
+            for m in eligible_members
+        }
+        for fut in concurrent.futures.as_completed(send_futures):
+            email = send_futures[fut]
+            try:
+                status = fut.result()
+            except Exception as e:
+                logger.warning("[auto_notify] DM 발송 예외 user=%s: %s", email, e)
+                status = "skipped_error"
+            result[status].append(email)
 
     logger.info(
         "[auto_notify] draft 완료 — 발송: %d, 회의없음팀: %d, space없음: %d, 오류: %d",
@@ -59,26 +86,43 @@ def send_confluence_reminder_to_all() -> dict[str, Any]:
         "sent": [], "skipped_no_meeting": [], "skipped_already_edited": [],
         "skipped_no_space": [], "skipped_error": [],
     }
-    for team in teams:
-        team_id = team["team_id"]
 
-        if not is_weekly_meeting_next_workday(team["calendar_id"]):
-            result["skipped_no_meeting"].append(team_id)
-            continue
+    # 팀별 캘린더 + Confluence 수정이력 체크 병렬
+    eligible_members: list[dict[str, str]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as ex:
+        team_futures = {ex.submit(_check_team_for_reminder, t): t for t in teams}
+        for fut in concurrent.futures.as_completed(team_futures):
+            team = team_futures[fut]
+            try:
+                skip_reason, members = fut.result()
+            except Exception as e:
+                logger.warning("[auto_notify] 팀 체크 예외 team=%s: %s", team["team_id"], e)
+                result["skipped_error"].append(team["team_id"])
+                continue
+            if skip_reason:
+                result[skip_reason].append(team["team_id"])
+            else:
+                eligible_members.extend(members)
 
-        # 페이지 없으면 "아직 안 씀"으로 간주 → 리마인드 발송
-        page_id = _get_this_week_page_id(team["report_root_page_id"], team["team_name"])
-        if page_id and has_human_edit_this_week(page_id):
-            result["skipped_already_edited"].append(team_id)
-            continue
-
-        for m in team["members"]:
-            status = _send_draft_to_user(
+    # 유저별 DM 발송 병렬
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as ex:
+        send_futures = {
+            ex.submit(
+                _send_draft_to_user,
                 user_email=m["email"],
                 user_display_name=m["name"],
                 reminder=True,
-            )
-            result[status].append(m["email"])
+            ): m["email"]
+            for m in eligible_members
+        }
+        for fut in concurrent.futures.as_completed(send_futures):
+            email = send_futures[fut]
+            try:
+                status = fut.result()
+            except Exception as e:
+                logger.warning("[auto_notify] DM 발송 예외 user=%s: %s", email, e)
+                status = "skipped_error"
+            result[status].append(email)
 
     logger.info(
         "[auto_notify] reminder 완료 — 발송: %d, 회의없음팀: %d, 이미수정: %d, 오류: %d",
@@ -86,6 +130,16 @@ def send_confluence_reminder_to_all() -> dict[str, Any]:
         len(result["skipped_already_edited"]), len(result["skipped_error"]),
     )
     return result
+
+
+def _check_team_for_reminder(team: dict[str, Any]) -> tuple[str | None, list[dict[str, str]]]:
+    """reminder용 팀 자격 체크. 반환: (skip_reason | None, eligible_members)."""
+    if not is_weekly_meeting_next_workday(team["calendar_id"]):
+        return "skipped_no_meeting", []
+    page_id = _get_this_week_page_id(team["report_root_page_id"], team["team_name"])
+    if page_id and has_human_edit_this_week(page_id):
+        return "skipped_already_edited", []
+    return None, team["members"]
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +257,8 @@ def _collect_members_by_team() -> list[dict[str, Any]]:
 
         calendar_id       = str(cfg.get("calendar_id") or "").strip()
         report_root_page_id = str(cfg.get("report_root_page_id") or "").strip()
+        confluence_space_key = str(cfg.get("confluence_space_key") or cfg.get("space_key") or "").strip()
+        shared_drive_ids   = [str(x).strip() for x in (cfg.get("shared_drive_ids") or []) if str(x).strip()]
 
         members: list[dict[str, str]] = []
         for m in cfg.get("team_members") or []:
@@ -221,6 +277,8 @@ def _collect_members_by_team() -> list[dict[str, Any]]:
             "team_name": team_name,
             "calendar_id": calendar_id,
             "report_root_page_id": report_root_page_id,
+            "confluence_space_key": confluence_space_key,
+            "shared_drive_ids": shared_drive_ids,
             "members": members,
         })
 
