@@ -21,6 +21,7 @@ from domains.daily_chat import (
     build_home_menu_card,
     build_settings_hub_card,
     handle_home_menu_action,
+    handle_settings_action,
     reply_daily_chat,
 )
 from domains.expert_finder import handle_expert_finder
@@ -77,6 +78,7 @@ class UserIntent(str, Enum):
 
     DAILY_CHAT = "daily_chat"
     EXPERT_FINDER = "expert_finder"
+    HOME_MENU = "home_menu"
     SCHEDULE_MANAGEMENT = "schedule_management"
     SETTINGS = "settings"
     WEEKLY_MEETING = "weekly_meeting"
@@ -98,6 +100,8 @@ def match_user_intent(user_message: str) -> UserIntent:
         return UserIntent.WEEKLY_REPORT_DRAFT
     if _settings_like(text):
         return UserIntent.SETTINGS
+    if _home_menu_like(text):
+        return UserIntent.HOME_MENU
     if _weekly_meeting_like(text):
         return UserIntent.WEEKLY_MEETING
     if _schedule_like(text):
@@ -134,6 +138,37 @@ def _settings_like(text: str) -> bool:
         "내 정보 연결",
         "oauth 연결",
         "oauth연결",
+    )
+    return any(k in stripped for k in keywords)
+
+
+def _home_menu_like(text: str) -> bool:
+    """인사·도움말·홈 메뉴 진입."""
+    stripped = text.strip()
+    if stripped in {
+        "안녕",
+        "안녕하세요",
+        "하이",
+        "hi",
+        "hello",
+        "홈",
+        "홈 메뉴",
+        "홈메뉴",
+        "메뉴",
+        "처음으로",
+        "도움말",
+        "help",
+    }:
+        return True
+    keywords = (
+        "뭐할수있어",
+        "뭐 할 수 있어",
+        "뭘 할 수 있어",
+        "무엇을 할 수 있",
+        "너 뭐할수있어",
+        "너 뭐 할 수 있어",
+        "할 수 있는 것",
+        "기능 알려",
     )
     return any(k in stripped for k in keywords)
 
@@ -249,6 +284,8 @@ def _dispatch_by_intent(
         case UserIntent.DAILY_CHAT:
             # 일상 대화: Vertex Gemini + Firestore 맥락 (domains.daily_chat.reply_daily_chat)
             return reply_daily_chat(user_message, chat_event=payload)
+        case UserIntent.HOME_MENU:
+            return build_home_menu_card(chat_event=payload)
         case UserIntent.EXPERT_FINDER:
             # 사내 전문가 찾기: 키워드 추출 → 즉시 응답 + 백그라운드 검색 thread (domains.expert_finder)
             return handle_expert_finder(user_message, chat_event=payload)
@@ -436,6 +473,22 @@ def hello_http(request):
             except Exception:
                 logger.exception("home menu action failed: invoked_function=%s", invoked_function)
                 reply = {"text": "메뉴 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
+            return (
+                json.dumps(reply, ensure_ascii=False),
+                200,
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
+        if invoked_function and invoked_function.startswith("st_"):
+            try:
+                reply = handle_settings_action(
+                    invoked_function=invoked_function,
+                    parameters=parameters,
+                    form_inputs=form_inputs,
+                    chat_event=payload,
+                )
+            except Exception:
+                logger.exception("settings action failed: invoked_function=%s", invoked_function)
+                reply = {"text": "설정 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
             return (
                 json.dumps(reply, ensure_ascii=False),
                 200,

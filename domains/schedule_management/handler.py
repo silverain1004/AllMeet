@@ -439,10 +439,13 @@ def handle_schedule_management_action(
         return build_home_menu_card(chat_event=chat_event, include_action_response=True)
 
     if invoked_function == "sm_open_settings":
-        return build_settings_card(
-            get_team_list(),
-            room_calendar_config=get_room_calendar_config(),
-            include_action_response=True,
+        from domains.settings.handler import handle_settings_action
+
+        return handle_settings_action(
+            invoked_function="st_open_rooms",
+            parameters=parameters,
+            form_inputs=form_inputs,
+            chat_event=chat_event,
         )
 
     if invoked_function == "sm_sync_rooms":
