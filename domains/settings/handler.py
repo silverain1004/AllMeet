@@ -153,7 +153,9 @@ def handle_settings_action(
         return build_settings_hub_card(include_action_response=True)
 
     if fn == "st_open_personal":
-        return build_personal_settings_card(include_action_response=True)
+        return build_personal_settings_card(
+            user_email=user_context.get("email") or "", include_action_response=True
+        )
 
     if fn == "st_oauth_link":
         from domains.weekly_meeting.handler import handle_weekly_meeting_action

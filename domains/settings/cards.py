@@ -108,16 +108,25 @@ def build_settings_hub_card(*, include_action_response: bool = False) -> dict[st
     return out
 
 
-def build_personal_settings_card(*, include_action_response: bool = False) -> dict[str, Any]:
+def build_personal_settings_card(
+    *, user_email: str = "", include_action_response: bool = False
+) -> dict[str, Any]:
+    # 이미 연결된 사용자에겐 "연결됨" 상태를, 미연결/해제 상태엔 안내 문구를 보여준다.
+    # 버튼은 상태와 무관하게 동일 — 재연결(만료/철회 복구)도 같은 버튼으로 진행.
+    from domains.daily_chat.home_menu import is_oauth_linked
+
+    if user_email and is_oauth_linked(user_email):
+        header_text = (
+            "<b>개인설정</b><br>"
+            "✅ Gmail · 개인 Calendar · 내 Drive가 연결되어 있어요."
+        )
+    else:
+        header_text = (
+            "<b>개인설정</b><br>"
+            "Gmail · 개인 Calendar · 내 Drive를 AllMeet와 연결합니다."
+        )
     widgets: list[dict[str, Any]] = [
-        {
-            "textParagraph": {
-                "text": (
-                    "<b>개인설정</b><br>"
-                    "Gmail · 개인 Calendar · 내 Drive를 AllMeet와 연결합니다."
-                )
-            }
-        },
+        {"textParagraph": {"text": header_text}},
         {
             "buttonList": {
                 "buttons": [

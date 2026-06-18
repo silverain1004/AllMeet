@@ -57,6 +57,33 @@ def test_settings_hub_has_three_branches():
     assert card["cardsV2"][0]["cardId"] == "st_settings_hub"
 
 
+def test_personal_card_shows_linked_status(monkeypatch):
+    from domains.daily_chat import home_menu
+    from domains.settings.cards import build_personal_settings_card
+
+    monkeypatch.setattr(
+        home_menu, "get_token", lambda email: {"status": "linked", "refresh_token": "x"}
+    )
+    card = build_personal_settings_card(user_email="user@vntgcorp.com")
+
+    assert any("연결되어 있어요" in t for t in _paragraph_texts(card))
+    # 버튼은 상태와 무관하게 그대로 유지 — 재연결 경로 보존.
+    functions = [b["onClick"]["action"]["function"] for b in _buttons(card)]
+    assert "st_oauth_link" in functions
+
+
+def test_personal_card_shows_connect_prompt_when_unlinked(monkeypatch):
+    from domains.daily_chat import home_menu
+    from domains.settings.cards import build_personal_settings_card
+
+    monkeypatch.setattr(home_menu, "get_token", lambda email: None)
+    card = build_personal_settings_card(user_email="user@vntgcorp.com")
+
+    assert any("연결합니다" in t for t in _paragraph_texts(card))
+    functions = [b["onClick"]["action"]["function"] for b in _buttons(card)]
+    assert "st_oauth_link" in functions
+
+
 def test_team_settings_card_has_four_dividers():
     from domains.settings.cards import build_team_settings_card
 
