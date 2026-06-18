@@ -275,6 +275,33 @@ def _normalize_names(values: list[str] | None) -> list[str]:
     return out
 
 
+def get_page_body(*, page_id: str, max_chars: int = 1500) -> str:
+    """Confluence 페이지 본문 (HTML 태그 제거 후 텍스트) 앞 max_chars 자 반환. 실패 시 빈 문자열."""
+    import re as _re
+
+    try:
+        auth = get_confluence_auth("")
+    except Exception as e:
+        logger.warning("confluence get_page_body auth 실패 page_id=%s: %s", page_id, e)
+        return ""
+
+    url = f"{auth['base_url']}/wiki/rest/api/content/{page_id}?expand=body.view"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("Authorization", auth["auth_header"])
+        req.add_header("Accept", "application/json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("confluence get_page_body %s 실패: %s", page_id, e)
+        return ""
+
+    html_content = ((data.get("body") or {}).get("view") or {}).get("value", "")
+    text = _re.sub(r"<[^>]+>", " ", html_content or "")
+    text = _re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
 def _iso_to_cql_date(iso: str) -> str:
     """ISO8601 → ``"YYYY-MM-DD HH:mm"`` (Confluence CQL date format)."""
     try:
