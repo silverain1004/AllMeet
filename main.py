@@ -23,6 +23,7 @@ from domains.daily_chat import (
     handle_home_menu_action,
     handle_settings_action,
     reply_daily_chat,
+    reply_with_home_menu,
 )
 from domains.expert_finder import handle_expert_finder
 from domains.schedule_management import (
@@ -285,7 +286,7 @@ def _dispatch_by_intent(
             # 일상 대화: Vertex Gemini + Firestore 맥락 (domains.daily_chat.reply_daily_chat)
             return reply_daily_chat(user_message, chat_event=payload)
         case UserIntent.HOME_MENU:
-            return build_home_menu_card(chat_event=payload)
+            return reply_with_home_menu(user_message, chat_event=payload)
         case UserIntent.EXPERT_FINDER:
             # 사내 전문가 찾기: 키워드 추출 → 즉시 응답 + 백그라운드 검색 thread (domains.expert_finder)
             return handle_expert_finder(user_message, chat_event=payload)

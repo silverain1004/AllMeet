@@ -151,6 +151,27 @@ def build_home_menu_card(
     return out
 
 
+def reply_with_home_menu(
+    user_message: str,
+    *,
+    chat_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """일상 대화 응답(text)과 홈 메뉴 카드(cardsV2)를 한 메시지로 반환."""
+    answer = reply_daily_chat(user_message, chat_event=chat_event)
+
+    if isinstance(answer, dict) and answer.get("cardsV2"):
+        out = dict(answer)
+        if not out.get("text"):
+            out["text"] = build_home_menu_card(chat_event=chat_event).get("text", "")
+        return out
+
+    menu = build_home_menu_card(chat_event=chat_event)
+    text = answer if isinstance(answer, str) else str(answer)
+    out = dict(menu)
+    out["text"] = text
+    return out
+
+
 def build_settings_hub_card(*, include_action_response: bool = False) -> dict[str, Any]:
     """설정 허브 — domains.settings 로 위임."""
     from domains.settings.cards import build_settings_hub_card as _build
