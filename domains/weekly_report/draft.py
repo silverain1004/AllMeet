@@ -19,6 +19,7 @@ from typing import Any
 
 from api.calendar.events import list_events
 from api.chat.messages import post_message_to_space
+from api.chat.progress import LiveProgress
 from api.confluence.pages import list_pages_modified
 from api.drive.files import list_files_modified
 from config.settings import ALLMEET_DRAFT_MODEL, LOCATION, PROJECT_ID
@@ -73,20 +74,49 @@ def handle_weekly_report_draft(
     return build_in_progress_card()
 
 
+# 진행상황 라이브 메시지 단계 — 수집 6종 + AI 분석. _collect_all_services 의 key 와 일치.
+_PROGRESS_STAGES: list[tuple[str, str]] = [
+    ("calendar", "팀 캘린더"),
+    ("drive", "Drive"),
+    ("confluence", "Confluence"),
+    ("gmail", "Gmail"),
+    ("personal_calendar", "개인 캘린더"),
+    ("personal_drive", "내 Drive"),
+    ("analyze", "AI 분석"),
+]
+
+
 def _run_draft_background(space_name: str, user_email: str, user_display_name: str) -> None:
-    """백그라운드 thread: 수집·분석 후 Chat REST 로 push."""
+    """백그라운드 thread: 수집·분석 후 Chat REST 로 push (진행상황 라이브 갱신)."""
+    reporter = LiveProgress(
+        space_name=space_name, title="주간보고초안 분석 중...", stages=_PROGRESS_STAGES
+    )
+    reporter.begin()  # 실패해도 live=False 로 폴백 — 결과만 새 메시지로 push.
     try:
-        result = _collect_and_draft(user_email=user_email, user_display_name=user_display_name)
-        post_message_to_space(space_name=space_name, payload=result)
+        result = _collect_and_draft(
+            user_email=user_email,
+            user_display_name=user_display_name,
+            progress=reporter,
+        )
+        if reporter.live:
+            reporter.finish(result)
+        else:
+            post_message_to_space(space_name=space_name, payload=result)
     except Exception:
         logger.exception("weekly_report background 실패")
-        post_message_to_space(
-            space_name=space_name,
-            payload={"text": "주간보고초안 처리 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요."},
-        )
+        err = {"text": "주간보고초안 처리 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요."}
+        if reporter.live:
+            reporter.finish(err)
+        else:
+            post_message_to_space(space_name=space_name, payload=err)
 
 
-def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, Any]:
+def _collect_and_draft(
+    *,
+    user_email: str,
+    user_display_name: str,
+    progress: LiveProgress | None = None,
+) -> dict[str, Any]:
     """팀 매칭 → 회의 일자 → 두 주치 raw 수집 → Vertex 분석 → 카드 빌드."""
     # 1. 사용자 → 팀
     team_id = find_team_by_email(user_email)
@@ -133,6 +163,7 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
         time_min=time_min,
         time_max=time_max,
         confluence_fallback_names=confluence_fallback_names,
+        progress=progress,
     )
 
     # 5. 모든 섹션 빈 결과 + 모든 에러 무 → 활동 없음 안내
@@ -141,6 +172,8 @@ def _collect_and_draft(*, user_email: str, user_display_name: str) -> dict[str, 
 
     # 6. Vertex 분석 (실패해도 raw 만으로 카드).
     # 카드 리스트 표시용 raw 는 그대로, LLM 입력만 주간회의 자체 항목 제거 — 자기참조 요약 방지.
+    if progress:
+        progress.active("analyze")
     draft = _vertex_analyze(
         user_display_name, user_email, meeting_date_str, _filter_for_draft(raw)
     )
@@ -195,10 +228,18 @@ def _collect_all_services(
     time_max: str,
     shared_drive_ids: list[str] | None = None,
     confluence_fallback_names: list[str] | None = None,
+    progress: LiveProgress | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """서비스별 호출 — 각각 try/except 격리. 한 곳 실패가 전체 죽이지 않게."""
+    """서비스별 호출 — 각각 try/except 격리. 한 곳 실패가 전체 죽이지 않게.
+
+    ``progress`` 가 주어지면 각 서비스 완료 직후 진행상황 메시지를 갱신한다(베스트-에포트).
+    """
     raw: dict[str, Any] = {}
     errors: dict[str, str] = {}
+
+    def _report(key: str) -> None:
+        if progress is not None:
+            progress.done(key, len(raw.get(key) or []))
 
     # Calendar (공용) — 본인이 참여한 이벤트만 필터, 노이즈(단순 상태표시·자기참조·전사 공지) 추가 제외.
     if calendar_id:
@@ -216,6 +257,7 @@ def _collect_all_services(
             errors["calendar"] = "exception"
     else:
         errors["calendar"] = "calendar_id_missing"
+    _report("calendar")
 
     # Drive — 팀이 등록한 Shared Drive 들 각각 조회 후 합산. 비어 있으면 env 폴백(미설정 시 안내).
     # 쿼리(`'<email>' in writers`)는 권한 기반이라 본인이 멤버인 한 다른 사람이 마지막 수정자인 파일도
@@ -285,6 +327,7 @@ def _collect_all_services(
         except Exception as e:
             logger.warning("drive 호출 예외: %s", e)
             errors["drive"] = "exception"
+    _report("drive")
 
     # Confluence
     if space_key:
@@ -309,6 +352,7 @@ def _collect_all_services(
             errors["confluence"] = "exception"
     else:
         errors["confluence"] = "space_key_missing"
+    _report("confluence")
 
     # Gmail (Phase 2 — OAuth 동의자 한정). 노이즈 메일은 raw 단계에서 사전 제거 → 카드 리스트도 깔끔.
     try:
@@ -322,6 +366,7 @@ def _collect_all_services(
     except Exception as e:
         logger.warning("gmail 호출 예외: %s", e)
         errors["gmail"] = "exception"
+    _report("gmail")
 
     # 개인 Calendar (Phase 2 — OAuth 동의자 한정, 본인 primary). 단순 상태표시·자기참조·전사 공지 제거.
     try:
@@ -341,6 +386,7 @@ def _collect_all_services(
     except Exception as e:
         logger.warning("personal_calendar 호출 예외: %s", e)
         errors["personal_calendar"] = "exception"
+    _report("personal_calendar")
 
     # 내 Drive (Phase 2 — OAuth 동의자 한정, 본인 My Drive)
     try:
@@ -358,6 +404,7 @@ def _collect_all_services(
     except Exception as e:
         logger.warning("personal_drive 호출 예외: %s", e)
         errors["personal_drive"] = "exception"
+    _report("personal_drive")
 
     return raw, errors
 
