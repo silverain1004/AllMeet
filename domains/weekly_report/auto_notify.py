@@ -41,7 +41,10 @@ def send_weekly_draft_to_all() -> dict[str, Any]:
     # 팀별 캘린더 체크 병렬
     eligible_members: list[dict[str, str]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as ex:
-        cal_futures = {ex.submit(is_weekly_meeting_next_workday, t["calendar_id"]): t for t in teams}
+        cal_futures = {
+            ex.submit(is_weekly_meeting_next_workday, t["calendar_id"], t["team_name"]): t
+            for t in teams
+        }
         for fut in concurrent.futures.as_completed(cal_futures):
             team = cal_futures[fut]
             try:
@@ -134,7 +137,7 @@ def send_confluence_reminder_to_all() -> dict[str, Any]:
 
 def _check_team_for_reminder(team: dict[str, Any]) -> tuple[str | None, list[dict[str, str]]]:
     """reminder용 팀 자격 체크. 반환: (skip_reason | None, eligible_members)."""
-    if not is_weekly_meeting_next_workday(team["calendar_id"]):
+    if not is_weekly_meeting_next_workday(team["calendar_id"], team["team_name"]):
         return "skipped_no_meeting", []
     page_id = _get_this_week_page_id(team["report_root_page_id"], team["team_name"])
     if page_id and has_human_edit_this_week(page_id):
@@ -153,10 +156,30 @@ def _next_workday_kst(from_dt: datetime) -> datetime:
     return from_dt + timedelta(days=delta)
 
 
-def is_weekly_meeting_next_workday(calendar_id: str) -> bool:
-    """다음 영업일(금→월, 그 외→내일) 팀 캘린더에 주간회의 이벤트가 있으면 True."""
+_KOR_WEEKDAY = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def _next_workday_phrase(from_dt: datetime) -> str:
+    """다음 영업일을 사람이 읽는 문구로. 바로 다음날이면 '내일', 아니면 '월요일(6/22)' 형태.
+
+    금요일에 발송하면 다음 영업일이 월요일(3일 뒤)이라 '내일' 이 틀린다 → 실제 요일·날짜로 표기.
+    """
+    target = _next_workday_kst(from_dt)
+    delta = (target.date() - from_dt.date()).days
+    if delta == 1:
+        return "내일"
+    return f"{_KOR_WEEKDAY[target.weekday()]}요일({target.month}/{target.day})"
+
+
+def is_weekly_meeting_next_workday(calendar_id: str, team_name: str = "") -> bool:
+    """다음 영업일(금→월, 그 외→내일) 팀 캘린더에 *본인 팀* 주간회의가 있으면 True.
+
+    공유 캘린더에는 'ERP2팀 주간회의', 'MES2팀 주간회의', '제조사업2센터 주간회의' 처럼
+    여러 팀·상위 센터 회의가 섞여 있어, ``q="주간회의"`` 만으로는 남의 팀 회의에도 발송된다.
+    ``team_name`` 으로 제목에 팀명이 든 본인 팀 회의로 좁힌다. (team_name 비면 폴백: 제목만 매칭)
+    """
     from api.calendar.events import list_events
-    from domains.weekly_report.timewindow import KST
+    from domains.weekly_report.timewindow import KST, _title_matches
 
     if not calendar_id:
         return False
@@ -179,7 +202,8 @@ def is_weekly_meeting_next_workday(calendar_id: str) -> bool:
     if not result.ok:
         logger.warning("[auto_notify] 캘린더 조회 실패 calendar_id=%s", calendar_id)
         return False
-    return len(result.events) > 0
+    matched = [e for e in result.events if _title_matches(str(e.get("summary") or ""), team_name)]
+    return len(matched) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +347,9 @@ def _send_draft_to_user(
         if reminder:
             payload["text"] = "아직 주간회의 내용을 작성하지 않으셨습니다! 초안을 다시 보내드립니다."
         else:
-            payload["text"] = "내일 주간회의가 있네요! 주간보고 초안을 보내드리겠습니다."
+            from domains.weekly_report.timewindow import KST
+            when = _next_workday_phrase(datetime.now(KST))
+            payload["text"] = f"{when} 주간회의가 있네요! 주간보고 초안을 보내드리겠습니다."
 
     try:
         from api.chat.messages import post_message_to_space
