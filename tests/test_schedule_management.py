@@ -708,6 +708,77 @@ def test_compose_confirm_calls_create_event(patch_members, monkeypatch):
     assert "예약이 완료되었습니다" in text
     assert "meet.google.com" in text
     assert captured.get("send_updates") == "none"
+    assert "초대메일전송" in text
+
+
+def test_compose_confirm_booker_only_skips_invite_updates(patch_members, monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+    from domains.schedule_management.handler import handle_schedule_management_action
+
+    monkeypatch.setenv("SCHEDULE_DRY_RUN", "false")
+    monkeypatch.setattr("domains.schedule_management.handler.is_dry_run", lambda: False)
+
+    captured: dict[str, Any] = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return cc.CalendarResult(
+            ok=True,
+            created_event={"id": "evt1", "htmlLink": "", "hangoutLink": ""},
+        )
+
+    monkeypatch.setattr("domains.schedule_management.handler.create_event", fake_create)
+    monkeypatch.setattr("domains.schedule_management.handler.save_reservation", lambda **kw: "res1")
+
+    handle_schedule_management_action(
+        invoked_function="sm_compose_confirm",
+        parameters=_full_confirm_params(attendees_pipe=""),
+        form_inputs={
+            "calendar_id": _form("user:u@x.com:primary"),
+            "meeting_date": _form("2026-05-10"),
+            "meeting_time": _form("10:00"),
+            "title": _form("킥오프"),
+        },
+        chat_event={"user": {"email": "u@x.com"}},
+    )
+    assert captured.get("send_updates") == "none"
+
+
+def test_send_invite_patch_includes_attendees(patch_members, monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+    from domains.schedule_management.handler import handle_schedule_management_action
+
+    captured: dict[str, Any] = {}
+
+    def fake_patch(**kwargs):
+        captured.update(kwargs)
+        return cc.CalendarResult(ok=True, created_event={"id": "evt1"})
+
+    monkeypatch.setattr("domains.schedule_management.handler.patch_event", fake_patch)
+    monkeypatch.setattr(
+        "domains.schedule_management.handler._resolve_calendar_auth",
+        lambda *_a, **_k: ("primary", "token"),
+    )
+
+    out = handle_schedule_management_action(
+        invoked_function="sm_send_invite",
+        parameters={
+            "last_api_calendar_id": "primary",
+            "last_event_id": "evt1",
+            "calendar_id": "user:u@x.com:primary",
+            "title": "킥오프",
+            "attendee_emails": "u@x.com,kim@x.com",
+            "booker_email": "u@x.com",
+            "meeting_date": "2026-05-10",
+            "meeting_time": "10:00",
+            "meeting_end_time": "11:00",
+        },
+        form_inputs={},
+        chat_event={"user": {"email": "u@x.com"}},
+    )
+    assert captured.get("send_updates") == "all"
+    assert captured.get("attendees") == ["u@x.com", "kim@x.com"]
+    assert "초대 메일" in str(out)
 
 
 def test_parse_capacity_from_room_name():

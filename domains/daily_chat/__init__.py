@@ -8,6 +8,7 @@ from domains.daily_chat.home_menu import (
     build_home_menu_card,
     handle_home_menu_action,
     is_oauth_linked,
+    reply_with_home_menu,
 )
 from domains.settings import build_settings_hub_card, handle_settings_action
 
@@ -17,5 +18,6 @@ __all__ = [
     "handle_home_menu_action",
     "handle_settings_action",
     "reply_daily_chat",
+    "reply_with_home_menu",
     "welcome_with_capabilities_text",
 ]

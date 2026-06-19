@@ -518,10 +518,15 @@ def handle_schedule_management_action(
                 lines=["캘린더 OAuth 연결이 필요합니다."],
                 include_action_response=True,
             )
+        attendee_emails = [
+            e.strip() for e in (parameters.get("attendee_emails") or "").split(",") if e.strip()
+        ]
+        booker_email = str(parameters.get("booker_email") or user_context.get("email") or "")
         result = patch_event(
             calendar_id=api_cal,
             event_id=event_id,
             summary=title,
+            attendees=attendee_emails or None,
             send_updates="all",
             access_token=access_token,
         )
@@ -531,10 +536,6 @@ def handle_schedule_management_action(
                 lines=[calendar_error_message(result)],
                 include_action_response=True,
             )
-        attendee_emails = [
-            e.strip() for e in (parameters.get("attendee_emails") or "").split(",") if e.strip()
-        ]
-        booker_email = str(parameters.get("booker_email") or user_context.get("email") or "")
         return build_booking_confirmed_card(
             status="created",
             meeting_title=title,
@@ -713,6 +714,7 @@ def handle_schedule_management_action(
                 location=location,
                 attendees=attendee_emails,
                 resource_emails=resource_emails,
+                send_updates="none",
                 access_token=access_token,
             )
         else:
