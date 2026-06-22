@@ -167,6 +167,21 @@ def handle_settings_action(
             chat_event=chat_event,
         )
 
+    if fn == "st_oauth_unlink":
+        from domains.settings.cards import build_oauth_unlink_confirm_card
+
+        return build_oauth_unlink_confirm_card(include_action_response=True)
+
+    if fn == "st_oauth_unlink_confirm":
+        from domains.weekly_meeting.oauth_callback import revoke_user_oauth
+
+        email = user_context.get("email") or ""
+        if email:
+            revoke_user_oauth(email)
+        card = build_personal_settings_card(user_email=email, include_action_response=True)
+        card["text"] = "🔓 연결을 해지했어요. 필요하면 언제든 다시 연결할 수 있어요."
+        return card
+
     if fn == "st_open_rooms":
         return build_room_region_card(include_action_response=True)
 

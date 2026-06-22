@@ -9,6 +9,57 @@ from typing import Any, Callable
 # task 끝의 진행률 표기 — ' -%' 또는 ' 100%', ' 50%' 등. 시각 강조용 분리에 사용.
 _PROGRESS_SUFFIX_RE = re.compile(r"\s+(-%|\d{1,3}%)\s*$")
 
+# 마감기한 표기 정규화용 — 'M/D'(정확한 일자) / 'M/E'(달만 알고 일자 미상=월말).
+_DEADLINE_MD_RE = re.compile(r"^0?(\d{1,2})\s*[/.\-]\s*0?(\d{1,2})$")
+_DEADLINE_ME_RE = re.compile(r"^0?(\d{1,2})\s*[/.\-]\s*[EeＥ말]$")
+_DEADLINE_MONTH_RE = re.compile(r"^0?(\d{1,2})\s*월?$")
+
+
+def normalize_deadline(deadline: str) -> str:
+    """마감기한 표기 정규화 → 'M/D' 또는 'M/E'(월말). 해석 불가면 원문(strip)·빈값은 ''.
+
+    - '06/26' → '6/26', '6/05' → '6/5' (앞자리 0 제거)
+    - '6/E', '06/e', '6/말' → '6/E' (일자 미상·월말)
+    - '6', '6월' → '6/E' (달만 알 때)
+    - 해석 못 하면 입력 그대로(앞뒤 공백만 제거).
+    """
+    s = (deadline or "").strip()
+    if not s:
+        return ""
+    m = _DEADLINE_MD_RE.match(s)
+    if m:
+        return f"{int(m.group(1))}/{int(m.group(2))}"
+    m = _DEADLINE_ME_RE.match(s)
+    if m:
+        return f"{int(m.group(1))}/E"
+    m = _DEADLINE_MONTH_RE.match(s)
+    if m:
+        return f"{int(m.group(1))}/E"
+    return s
+
+
+_BADGE_MD_RE = re.compile(r"^(\d{1,2})/(\d{1,2})$")
+_BADGE_ME_RE = re.compile(r"^(\d{1,2})/E$")
+
+
+def format_deadline_badge(deadline: str) -> str:
+    """정규화된 마감기한(normalize_deadline 결과)을 배지 표기용으로 0 패딩.
+
+    - '6/26' → '06/26', '6/5' → '06/05'
+    - '6/E'  → '06/E' (일자 미상=월말)
+    - 그 외(해석 불가 원문)는 그대로.
+    """
+    s = (deadline or "").strip()
+    if not s:
+        return ""
+    m = _BADGE_MD_RE.match(s)
+    if m:
+        return f"{int(m.group(1)):02d}/{int(m.group(2)):02d}"
+    m = _BADGE_ME_RE.match(s)
+    if m:
+        return f"{int(m.group(1)):02d}/E"
+    return s
+
 
 def build_in_progress_card() -> dict[str, Any]:
     """즉시 응답용 — '분석 중' 안내."""
@@ -248,12 +299,8 @@ def _render_draft_body(draft: dict[str, Any]) -> str:
             task = str(it.get("task") or "").strip()
             if not task:
                 continue
-            deadline = str(it.get("deadline") or "").strip()
-            task_badge = _format_task_with_progress(task)
-            if deadline:
-                task_badge += (
-                    f'&nbsp;&nbsp;<font color="#c62828"><b>📅 {html.escape(deadline)}</b></font>'
-                )
+            deadline = normalize_deadline(str(it.get("deadline") or ""))
+            task_badge = _format_task_with_progress(task, deadline)
             task_lines = [f"- {task_badge}"]
             for d in it.get("details") or []:
                 detail = str(d or "").strip()
@@ -267,15 +314,20 @@ def _render_draft_body(draft: dict[str, Any]) -> str:
     return "<br><br>".join(blocks)
 
 
-def _format_task_with_progress(task: str) -> str:
-    """task 끝의 ' -%' / ' 100%' 진행률을 색상·볼드 배지로 강조.
+def _format_task_with_progress(task: str, deadline: str = "") -> str:
+    """task 끝의 ' -%' / ' 100%' 진행률을 색상·볼드 배지로 강조. deadline 은 배지 안에 함께.
 
-    매치 없으면 task 전체를 escape 만 해서 반환.
-    배지 형식: [ -% ] / [ X% ] / [ 100% ] — 괄호로 뱃지 느낌.
+    배지 형식:
+        deadline 없음 → [ -% ] / [ X% ] / [ 100% ]
+        deadline 있음 → [ -%  06/26 ] / [ -%  06/E ] — 진행률 뒤에 마감(빨강)을 같은 괄호로 묶음.
+    진행률 매치가 없으면 task 는 escape 만, deadline 있으면 [ 06/26 ] 만 뒤에 붙임.
     """
+    dl = format_deadline_badge(deadline)
+    dl_badge = f'<font color="#c62828">{html.escape(dl)}</font>' if dl else ""
     m = _PROGRESS_SUFFIX_RE.search(task)
     if not m:
-        return html.escape(task)
+        head = html.escape(task)
+        return f"{head} <b>[ {dl_badge} ]</b>" if dl else head
     head = task[: m.start()].rstrip()
     prog = m.group(1)
     if prog == "-%":
@@ -284,7 +336,10 @@ def _format_task_with_progress(task: str) -> str:
         color = "#1e8e3e"  # 녹색 — 완료
     else:
         color = "#f29900"  # 주황 — 진행 중
-    return f'{html.escape(head)} <font color="{color}"><b>[ {prog} ]</b></font>'
+    prog_badge = f'<font color="{color}">{prog}</font>'
+    if dl:
+        return f"{html.escape(head)} <b>[ {prog_badge}&nbsp;&nbsp;{dl_badge} ]</b>"
+    return f"{html.escape(head)} <b>[ {prog_badge} ]</b>"
 
 
 def _service_widget(

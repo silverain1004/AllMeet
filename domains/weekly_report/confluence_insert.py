@@ -13,6 +13,7 @@ from typing import Any
 
 from api.confluence.client import ConfluenceClient
 from api.confluence.previous_report import get_latest_weekly_report_page_id_for_team_root
+from domains.weekly_report.cards import format_deadline_badge, normalize_deadline
 from firestore.team_config import find_team_by_email, get_team_config, get_team_from_index
 
 logger = logging.getLogger(__name__)
@@ -196,12 +197,12 @@ def _draft_to_confluence_html(draft: dict) -> str:
     """draft → Confluence Storage Format HTML (담당자 표 금주 셀용).
 
     진행률은 Confluence Status 매크로(색칠된 네모 배지)로 렌더링.
-    deadline 이 있으면 배지 옆에 표시.
+    deadline 이 있으면 배지 제목에 함께 표기 — 예) '-% 06/26', '100% 06/E'.
 
     구조:
         <p><strong>[프로젝트]</strong></p>
         <ul>
-          <li>{status_macro} task명  | 마감: MM/DD
+          <li>task명 {status_macro: -% 06/26}
             <ul><li>detail1</li></ul>
           </li>
         </ul>
@@ -219,13 +220,12 @@ def _draft_to_confluence_html(draft: dict) -> str:
             task = str(it.get("task") or "").strip()
             if not task:
                 continue
-            deadline = str(it.get("deadline") or "").strip()
+            deadline = normalize_deadline(str(it.get("deadline") or ""))
             details = [str(d).strip() for d in (it.get("details") or []) if str(d or "").strip()]
 
-            # task 끝의 진행률 분리 → Status 매크로
-            task_text, status_macro = _split_task_and_status(task)
-            deadline_html = f" | 📅 마감: {_xe(deadline)}" if deadline else ""
-            task_html = f"{_xe(task_text)} {status_macro}{deadline_html}"
+            # task 끝의 진행률 분리 → Status 매크로 (마감기한은 배지 안에 함께: '-% 06/26')
+            task_text, status_macro = _split_task_and_status(task, deadline)
+            task_html = f"{_xe(task_text)} {status_macro}"
 
             if details:
                 sub = "".join(f"<li>{_xe(d)}</li>" for d in details)
@@ -240,10 +240,11 @@ def _draft_to_confluence_html(draft: dict) -> str:
 _PROGRESS_RE = re.compile(r"\s+(-%|\d{1,3}%)\s*$")
 
 
-def _split_task_and_status(task: str) -> tuple[str, str]:
+def _split_task_and_status(task: str, deadline: str = "") -> tuple[str, str]:
     """task 문자열에서 진행률을 분리해 (task_text, status_macro_html) 반환.
 
     진행률 없으면 status_macro 는 Grey '-%' 배지.
+    deadline 이 있으면 배지 제목에 함께 표기 — 예) '-% 06/26', '100% 06/E'.
     """
     m = _PROGRESS_RE.search(task)
     if m:
@@ -253,11 +254,13 @@ def _split_task_and_status(task: str) -> tuple[str, str]:
         prog = "-%"
         task_text = task
 
+    dl = format_deadline_badge(deadline)
+    title = f"{prog} {dl}" if dl else prog
     colour = _progress_to_colour(prog)
     macro = (
         f'<ac:structured-macro ac:name="status" ac:schema-version="1">'
         f'<ac:parameter ac:name="colour">{colour}</ac:parameter>'
-        f'<ac:parameter ac:name="title">{_xe(prog)}</ac:parameter>'
+        f'<ac:parameter ac:name="title">{_xe(title)}</ac:parameter>'
         f'</ac:structured-macro>'
     )
     return task_text, macro
@@ -317,19 +320,43 @@ def _section_ul_range(html: str, header: str) -> tuple[int, int]:
     return -1, -1
 
 
+_BLOCK_OPEN_RE = re.compile(r"<(?:p|h[1-6])(?:\s[^>]*)?>", re.IGNORECASE)
+_BLOCK_CLOSE_RE = re.compile(r"</(?:p|h[1-6])>", re.IGNORECASE)
+
+
 def _find_section_tag_start(html: str, header: str) -> int:
     """기존 HTML에서 header 텍스트만 포함하는 블록 태그의 시작 인덱스를 반환.
 
     태그 구조(속성, 중첩 인라인 태그, local-id 등)와 무관하게 텍스트 내용만 비교.
     Confluence Storage Format의 <p local-id="...">, <strong local-id="...">,
-    <span>, <h2> 등 모든 형식을 지원. 없으면 -1.
+    <span>, <h2>/<h4> 등 모든 형식을 지원. 없으면 -1.
+
+    header 텍스트 위치를 먼저 찾은 뒤 '가장 가까운 앞쪽 블록 여는 태그'에 앵커링한다.
+    전체 <p>…</p> 블록을 한 번에 매칭하지 않으므로, 사용자가 손수 편집해 닫히지 않은
+    <p>(dangling tag) 가 섞여 있어도 non-greedy 매칭이 헤더를 통째로 삼켜 -1 이 되는
+    버그가 발생하지 않는다.
     """
-    pat = re.compile(r"<(p|h[1-6])(\s[^>]*)?>.*?</\1>", re.IGNORECASE | re.DOTALL)
-    for m in pat.finditer(html):
-        text = re.sub(r"<[^>]+>", "", m.group(0)).strip()
-        if text == header:
-            return m.start()
-    return -1
+    pos = 0
+    while True:
+        idx = html.find(header, pos)
+        if idx == -1:
+            return -1
+        pos = idx + len(header)
+        # 헤더 텍스트를 감싸는 가장 가까운 블록 여는 태그 (<p>/<hN>)
+        last_open = None
+        for m in _BLOCK_OPEN_RE.finditer(html, 0, idx):
+            last_open = m
+        if last_open is None:
+            continue
+        # 헤더 텍스트 뒤의 첫 블록 닫는 태그까지가 한 블록 — 텍스트가 정확히 header 면 채택
+        close_m = _BLOCK_CLOSE_RE.search(html, idx)
+        if close_m is None:
+            continue
+        block_text = re.sub(
+            r"<[^>]+>", "", html[last_open.start() : close_m.end()]
+        ).strip()
+        if block_text == header:
+            return last_open.start()
 
 
 def _merge_draft_sections(existing_html: str, new_html: str) -> str:

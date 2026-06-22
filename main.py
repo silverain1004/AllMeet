@@ -18,6 +18,7 @@ from typing import Any
 import functions_framework
 
 from domains.daily_chat import (
+    build_added_to_space_card,
     build_home_menu_card,
     build_settings_hub_card,
     handle_home_menu_action,
@@ -450,10 +451,10 @@ def hello_http(request):
             {"Content-Type": "application/json; charset=utf-8"},
         )
 
-    # 봇이 스페이스에 추가될 때 — 홈 메뉴(설정·OAuth는 6번에서).
+    # 봇이 스페이스에 추가/재추가될 때 — 미연결이면 데이터 연결 안내, 연결됐으면 홈 메뉴.
     if payload.get("type") == "ADDED_TO_SPACE":
         return (
-            json.dumps(build_home_menu_card(chat_event=payload), ensure_ascii=False),
+            json.dumps(build_added_to_space_card(chat_event=payload), ensure_ascii=False),
             200,
             {"Content-Type": "application/json; charset=utf-8"},
         )

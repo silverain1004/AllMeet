@@ -127,17 +127,72 @@ def handle_oauth_callback(request: Any) -> tuple[str, int, dict[str, str]]:
 
         pushed = post_message_to_space(
             space_name=space_name,
-            payload=build_home_menu_card(),
+            payload=build_home_menu_card(user_email=user_email),
         )
         if not pushed:
             logger.warning("OAuth 완료 후 챗 push 실패: space=%s", space_name)
 
     return _html_response(
-        f"<h2>연결 완료 ✅</h2>"
-        f"<p><b>{user_email}</b> 의 Gmail · 개인 Calendar · 내 Drive 가 봇과 연결되었어요.</p>"
-        f"<p>이 창을 닫고 챗으로 돌아가 주세요. 챗에 안내 메시지가 도착해 있을 거예요.</p>",
+        '<svg class="check" width="76" height="76" viewBox="0 0 76 76" '
+        'role="img" aria-label="완료">'
+        '<circle cx="38" cy="38" r="36" fill="#22c55e"/>'
+        '<path d="M23 39 l10 10 l20 -22" fill="none" stroke="#fff" '
+        'stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>'
+        "</svg>"
+        "<h1>연결 완료</h1>"
+        f'<p><span class="email">{user_email}</span> 의 데이터가 '
+        "AllMeet와 안전하게 연결되었어요.</p>"
+        '<p class="scopes">'
+        '<span class="chip">Gmail</span>'
+        '<span class="chip">개인 Calendar</span>'
+        '<span class="chip">내 Drive</span>'
+        "</p>"
+        '<p class="hint">이 창을 닫고 챗으로 돌아가 주세요.<br>'
+        "챗에 안내 메시지가 도착해 있을 거예요.</p>",
         200,
     )
+
+
+def revoke_user_oauth(user_email: str) -> bool:
+    """사용자 OAuth 연결 해지 — Google 측 토큰 폐기(best-effort) + 내부 상태 정리.
+
+    1. 저장된 refresh_token 을 Google revoke 엔드포인트로 폐기 시도(실패해도 진행).
+    2. Firestore status 를 ``revoked`` 로, 팀 멤버 oauth_status 동기화.
+    3. 인메모리 credentials 캐시 제거.
+
+    Returns: 내부 상태 정리까지 마쳤으면 True.
+    """
+    if not user_email:
+        return False
+
+    from firestore.oauth_tokens import get_token, revoke
+
+    record = get_token(user_email) or {}
+    token = record.get("refresh_token") or ""
+    if token:
+        try:
+            body = urllib.parse.urlencode({"token": token}).encode("utf-8")
+            req = urllib.request.Request(
+                "https://oauth2.googleapis.com/revoke",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            # 이미 만료/폐기됐거나 네트워크 오류 — 내부 상태 정리는 계속 진행.
+            logger.info("OAuth Google revoke 실패(무시) %s: %s", user_email, e)
+
+    revoke(user_email)
+    sync_oauth_status(user_email=user_email, status="revoked")
+    try:
+        from api._auth.user_oauth import invalidate_cache
+
+        invalidate_cache(user_email)
+    except Exception:
+        pass
+    logger.info("OAuth 연결 해지 완료: %s", user_email)
+    return True
 
 
 def _exchange_code(code: str) -> dict[str, Any] | None:
@@ -194,8 +249,27 @@ def _email_from_id_token(id_token: str) -> str:
 
 
 def _html_response(body: str, status: int) -> tuple[str, int, dict[str, str]]:
-    html = f"""<!doctype html><html><head>
-<meta charset="utf-8"><title>All-Meet OAuth</title>
-<style>body{{font-family:system-ui;max-width:560px;margin:60px auto;padding:0 20px;color:#222}}</style>
-</head><body>{body}</body></html>"""
+    html = f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AllMeet 연결</title>
+<style>
+  *{{box-sizing:border-box}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+    margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,#eef2ff 0%,#f8fafc 100%);color:#1f2933;padding:24px}}
+  .card{{background:#fff;max-width:480px;width:100%;border-radius:18px;
+    box-shadow:0 12px 40px rgba(15,23,42,.12);padding:40px 36px;text-align:center}}
+  .brand{{margin-bottom:22px;font-weight:800;font-size:30px;letter-spacing:.3px;color:#4f46e5}}
+  .check{{display:block;margin:4px auto 2px}}
+  h1{{font-size:22px;margin:10px 0 6px}}
+  h2{{font-size:20px;margin:10px 0 6px}}
+  p{{font-size:15px;line-height:1.65;color:#52606d;margin:8px 0}}
+  .email{{font-weight:700;color:#1f2933}}
+  .scopes{{margin-top:14px}}
+  .chip{{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;
+    padding:5px 13px;margin:4px 4px 0;font-size:13px;font-weight:600}}
+  .hint{{margin-top:22px;font-size:13px;color:#9aa5b1}}
+</style>
+</head><body><div class="card"><div class="brand">AllMeet</div>{body}</div></body></html>"""
     return html, status, {"Content-Type": "text/html; charset=utf-8"}

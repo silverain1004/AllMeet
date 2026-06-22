@@ -13,13 +13,13 @@ from __future__ import annotations
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from typing import Any
 
 from domains.weekly_report.auto_notify import (
     _collect_members_by_team,
     _get_space_name_by_email,
 )
+from domains.weekly_report.timewindow import kst_now
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,9 @@ def _analyze_and_build_card(
     from domains.daily_brief.prompts import BRIEFING_RESPONSE_SCHEMA, build_briefing_prompt
     from domains.weekly_report.draft import _get_vertex_model
 
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # KST 기준 오늘 — UTC 로 잡으면 새벽~오전(09:00 KST 발송 시 00:00 UTC) 날짜가
+    # 하루 밀려 헤더·LLM '오늘 날짜'가 어제로 찍히고, 오늘 일정이 '내일'로 오분류됨.
+    today_str = kst_now().strftime("%Y-%m-%d")
 
     has_data = any(bool(raw.get(k)) for k in ("gmail", "drive", "personal_drive", "confluence", "today_calendar"))
     if not has_data:
