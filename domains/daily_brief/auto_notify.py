@@ -172,6 +172,22 @@ def _analyze_and_build_card(
     except Exception as e:
         logger.warning("[daily_brief] 2차 LLM 분석 실패 user=%s: %s", user_email, e)
 
+    # 분석 결과 추적 로그 — 성공 시엔 별도 로그가 없어 "어떤 분석이 나왔는지"를
+    # 로그로 역추적할 수 없었다. 수집 건수 → 산출 할일 건수/요약을 한 줄로 남긴다.
+    logger.info(
+        "[daily_brief] 분석결과 user=%s 수집(gmail=%d,drive=%d,personal=%d,confluence=%d,calendar=%d)"
+        " → tasks=%d(urgent=%d,action=%d,fyi=%d) summary=%r",
+        user_email,
+        len(raw.get("gmail") or []), len(raw.get("drive") or []),
+        len(raw.get("personal_drive") or []), len(raw.get("confluence") or []),
+        len(raw.get("today_calendar") or []),
+        len(tasks),
+        sum(1 for t in tasks if t.get("priority") == "urgent"),
+        sum(1 for t in tasks if t.get("priority") == "action"),
+        sum(1 for t in tasks if t.get("priority") == "fyi"),
+        summary[:120],
+    )
+
     return build_briefing_card(
         user_name=user_name,
         today_str=today_str,

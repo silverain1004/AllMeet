@@ -322,6 +322,8 @@ def _get_select_model():
         from vertexai.generative_models import GenerativeModel
 
         vertexai.init(project=PROJECT_ID, location=LOCATION)
-        # 1차 선별은 Flash로 (빠르고 저렴)
-        _vertex_model_select = GenerativeModel("gemini-2.0-flash-001")
+        # 1차 선별은 Flash로 (빠르고 저렴). 하드코딩한 gemini-2.0-flash-001 은
+        # 배포 리전(us-central1)에 없어 404 → 매번 폴백했으므로, 동작이 확인된
+        # 설정값(ALLMEET_DRAFT_MODEL, 기본 gemini-2.5-flash)을 재사용한다.
+        _vertex_model_select = GenerativeModel(ALLMEET_DRAFT_MODEL)
     return _vertex_model_select
