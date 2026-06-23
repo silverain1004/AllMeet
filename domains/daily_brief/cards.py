@@ -47,7 +47,7 @@ def build_briefing_card(
 
     if not urgent and not action and not fyi:
         sections.append({
-            "widgets": [{"textParagraph": {"text": "어제 할일 항목을 찾지 못했어요."}}]
+            "widgets": [{"textParagraph": {"text": "오늘 처리할 할 일은 따로 없네요. 가볍게 시작하세요! 👍"}}]
         })
 
     # 데이터 수집 오류 안내 — 기술 코드는 노출하지 않음.

@@ -169,21 +169,63 @@ def build_oauth_link_card(
     *,
     user_email: str,
     auth_url: str,
+    intro: str | None = None,
     include_action_response: bool = False,
 ) -> dict[str, Any]:
     """OAuth 동의 안내 카드 — 사용자가 외부 링크를 눌러 Google 동의 화면으로.
 
     독립 카드 (주간회의 메뉴와 무관) — 동의 완료되면 OAuth callback 이 자동으로
     같은 스페이스에 환영 메시지를 push.
+
+    intro: 맨 위에 덧붙일 안내 문구(HTML). 앱 추가 직후 '아직 연결 안 됨' 안내 등.
     """
     safe_email = html.escape(user_email)
-    widgets = [
+    widgets: list[dict[str, Any]] = []
+    if intro:
+        widgets.append({"textParagraph": {"text": intro}})
+    widgets += [
         {
             "textParagraph": {
                 "text": (
-                    f"<b>{safe_email}</b> 의 Gmail · 개인 Calendar · 내 Drive 를 봇과 연결합니다.<br>"
-                    "아래 버튼을 누르면 Google 동의 화면이 열려요. "
-                    "동의를 완료하면 챗으로 자동 안내가 옵니다."
+                    f"<b>{safe_email}</b> 의 Google Workspace 데이터를 AllMeet와 연결해요.<br>"
+                    "연결하면 아래 기능이 <b>내 실제 업무 데이터를 기반</b>으로 동작합니다."
+                )
+            }
+        },
+        {
+            "textParagraph": {
+                "text": (
+                    "<b>🔍 연결되는 범위</b><br>"
+                    "• <b>Gmail</b> — 제목·발신자·날짜 등 <b>메타데이터만</b> 읽어요 "
+                    "(<b>본문은 읽지 않습니다</b>)<br>"
+                    "• <b>개인 Calendar</b> — 일정 조회 및 회의 예약<br>"
+                    "• <b>내 Drive</b> — 내가 만들거나 수정한 문서"
+                )
+            }
+        },
+        {
+            "textParagraph": {
+                "text": (
+                    "<b>📌 이런 곳에 쓰일 수 있어요</b> <font color=\"#888888\">(예시)</font><br>"
+                    "• <b>주간보고 초안 · 오늘의 할 일</b> — 내 메일·문서·일정을 모아 "
+                    "<b>나에게만</b> 보이는 초안을 만들어요.<br>"
+                    "• <b>회의실 · 일정 검색</b> — 내 캘린더의 빈 시간을 찾아 예약을 도와요.<br>"
+                    "• <b>사내 전문가 찾기</b> — 동료가 키워드로 전문가를 찾을 때, "
+                    "내가 <b>보낸 메일의 제목</b>과 <b>내가 주최한 일정의 제목</b>이 "
+                    "검색 근거로 쓰여 <b>다른 동료에게 보일 수 있어요</b>. "
+                    "(받은 메일·초대만 받은 일정·메일 본문은 제외)<br>"
+                    "<font color=\"#888888\">이 밖에도 AllMeet의 업무 보조 기능 전반에서 "
+                    "위 범위의 데이터가 활용될 수 있어요.</font>"
+                )
+            }
+        },
+        {
+            "textParagraph": {
+                "text": (
+                    '<font color="#888888">🔒 부여한 권한은 토큰으로 안전하게 보관돼요.<br>'
+                    "⚙️ 설정 → 개인설정에서 언제든 연결을 해제할 수 있어요.<br>"
+                    "아래 버튼을 누르면 Google 동의 화면이 열리고, 동의를 마치면 "
+                    "챗으로 자동 안내가 옵니다.</font>"
                 )
             }
         },
@@ -194,13 +236,17 @@ def build_oauth_link_card(
                         "text": "🔗 Google 동의 페이지 열기",
                         "onClick": {"openLink": {"url": auth_url}},
                     },
+                    {
+                        "text": "뒤로",
+                        "onClick": {"action": {"function": "hm_open_menu"}},
+                    },
                 ]
             }
         },
     ]
     return _wrap_card(
         "wm_oauth_link",
-        {"title": "AllMeet", "subtitle": "내 데이터 연결"},
+        {"title": "AllMeet", "subtitle": "내 데이터(GWS) 연결"},
         widgets,
         include_action_response=include_action_response,
     )

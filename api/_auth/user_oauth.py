@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
@@ -17,6 +18,11 @@ from config.settings import OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET
 from firestore.oauth_tokens import get_token, touch_refreshed, update_status
 
 logger = logging.getLogger(__name__)
+
+# 연결 상태 검증용 최소 스코프 — refresh_token 의 grant 유효성은 all-or-nothing 이라
+# 어떤 스코프로 refresh 하든 살았는지/죽었는지를 동일하게 알 수 있다. 항상 부여되는
+# openid·email 만 써서 oauth_callback import(순환 위험) 없이 가볍게 검증한다.
+_PROBE_SCOPES = ["openid", "email"]
 
 # 캐시 키 — (user_email, sorted scopes tuple). scope 별로 access_token 이 달라지므로
 # email 만으로 캐싱하면 다른 scope 호출이 폴루션 되어 403 발생.
@@ -94,19 +100,57 @@ def get_user_credentials(user_email: str, scopes: list[str]) -> Credentials:
     )
     try:
         creds.refresh(Request())
-    except Exception as e:
-        logger.warning("refresh_token 재발급 실패 (%s): %s", user_email, e)
+    except RefreshError as e:
+        # 토큰 자체가 무효 (invalid_grant — 권한 철회·7일 만료·재동의로 폐기 등).
+        # 재동의가 필요한 확정 상태라 status 를 revoked 로 갱신한다.
+        logger.warning("refresh_token 무효 (%s): %s", user_email, e)
         update_status(user_email, "revoked")
         with _lock:
             for k in list(_creds_cache.keys()):
                 if k[0] == user_email:
                     _creds_cache.pop(k, None)
         raise AuthRequiredError(user_email, reason="refresh_failed") from e
+    except Exception as e:
+        # 네트워크·서버 일시 오류 — 토큰은 멀쩡할 수 있으니 status 는 건드리지 않는다
+        # (여기서 revoked 로 찍으면 일시 장애에 멀쩡한 연결이 끊겨 재동의를 강요당함).
+        logger.warning("refresh_token 재발급 일시 실패 (%s): %s", user_email, e)
+        raise AuthRequiredError(user_email, reason="refresh_transient") from e
 
     touch_refreshed(user_email)
     with _lock:
         _creds_cache[key] = creds
     return creds
+
+
+def verify_oauth_connection(user_email: str) -> bool:
+    """refresh_token 이 실제로 살아있는지 검증 — 홈 메뉴·설정의 연결 배지용.
+
+    Firestore ``status`` 만 읽는 ``is_oauth_linked`` 는 토큰이 죽어도(앱 재설치·
+    7일 만료·권한 철회) 다음 API 호출 전까지 ``linked`` 로 남아 '연결됨' 으로
+    잘못 표시된다. 이 함수는 실제 refresh 를 시도해 진짜 사용 가능 여부를 본다.
+
+    - 토큰 무효(refresh_failed): ``False`` — 동시에 ``get_user_credentials`` 가
+      status 를 ``revoked`` 로 갱신해 자기치유된다.
+    - 일시 오류(refresh_transient): 섣불리 미연결로 단정하지 않고 저장된 status 로 폴백.
+    - 성공: ``True``. 결과 creds 는 캐시되어 access_token 유효 구간(약 1h) 내
+      재호출은 네트워크 없이 즉답.
+    """
+    if not user_email:
+        return False
+    try:
+        get_user_credentials(user_email, _PROBE_SCOPES)
+        return True
+    except AuthRequiredError as e:
+        if e.reason == "refresh_transient":
+            # 네트워크 일시 오류 — Firestore status 로 폴백(섣불리 미연결로 단정 X).
+            try:
+                rec = get_token(user_email)
+                return bool(rec and rec.get("status") == "linked" and rec.get("refresh_token"))
+            except Exception:
+                return False
+        return False
+    except Exception:  # Firestore 등 예기치 못한 오류 — 배지 때문에 호출자가 깨지면 안 됨.
+        return False
 
 
 # 함수 — bearer token 직접 호출용.

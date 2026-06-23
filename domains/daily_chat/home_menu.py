@@ -104,19 +104,62 @@ def _message_chat_event(chat_event: dict[str, Any] | None) -> dict[str, Any]:
     return base
 
 
+def _oauth_status_widget(user_email: str) -> dict[str, Any]:
+    """홈 메뉴 헤더 바로 아래 '내 데이터(GWS)' 연결 상태 행.
+
+    연결 여부를 한눈에 보여주고, 미연결(또는 만료·철회)이면 행 오른쪽 끝에
+    '연결하기' 버튼을 둔다. 앱을 지웠다 다시 추가해 토큰이 풀린 상태에서도
+    홈 메뉴만 열면 바로 재연결 동선을 탈 수 있다.
+
+    저장된 status 만 읽으면 토큰이 죽어도 한동안 '연결됨' 으로 잘못 떠서,
+    여기서는 실제 토큰을 검증(verify_oauth_connection)해 진짜 상태를 보여준다.
+    검증 결과 creds 는 캐시되어 반복 렌더에는 네트워크가 거의 없다.
+    """
+    from api._auth.user_oauth import verify_oauth_connection
+
+    try:
+        linked = bool(user_email) and verify_oauth_connection(user_email)
+    except Exception:  # 어떤 이유로든 배지 때문에 홈 메뉴 전체가 깨지면 안 됨 — 미연결로 폴백.
+        linked = False
+    if linked:
+        return {
+            "decoratedText": {
+                "topLabel": "내 데이터 (GWS)",
+                "text": '<font color="#1e8e3e"><b>🟢 연결됨</b></font>',
+            }
+        }
+    return {
+        "decoratedText": {
+            "topLabel": "내 데이터 (GWS)",
+            "text": '<font color="#d93025"><b>🔴 연결 안 됨</b></font>',
+            "button": {
+                "text": "연결하기",
+                "onClick": {"action": {"function": "hm_oauth_link"}},
+            },
+        }
+    }
+
+
 def build_home_menu_card(
     *,
     chat_event: dict[str, Any] | None = None,
+    user_email: str | None = None,
     daily_prompt: str | None = None,
     info_prompt: str | None = None,
     include_action_response: bool = False,
 ) -> dict[str, Any]:
-    """6버튼 홈 메뉴. 1·2번은 표시 시점의 랜덤 예시(버튼 라벨·prompt 동일)."""
-    _ = chat_event  # 향후 사용자별 맞춤 프롬프트용
+    """6버튼 홈 메뉴. 1·2번은 표시 시점의 랜덤 예시(버튼 라벨·prompt 동일).
+
+    헤더 아래에 'GWS 연결 상태' 행을 함께 노출한다. user_email 을 직접 주면
+    그 값으로, 없으면 chat_event 에서 추출해 연결 여부를 판정한다(동의 완료 직후
+    callback 푸시처럼 chat_event 가 없는 경로는 user_email 을 넘겨야 정확).
+    """
     daily = daily_prompt or random.choice(DAILY_PROMPTS)
     info = info_prompt or random.choice(INFO_PROMPTS)
+    email = (user_email or _user_email(chat_event)).strip()
 
     widgets: list[dict[str, Any]] = [
+        _oauth_status_widget(email),
         {
             "textParagraph": {
                 "text": (
@@ -154,6 +197,51 @@ def build_home_menu_card(
     )
     out["text"] = "All-Meet 홈 메뉴입니다. 원하는 기능을 선택해 주세요."
     return out
+
+
+def build_added_to_space_card(
+    *, chat_event: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """봇이 스페이스에 추가/재추가될 때 첫 카드.
+
+    아직 연결 안 됐으면(처음 추가·삭제 후 재추가 모두) 데이터 사용처를 설명하는
+    연결 안내 카드를 먼저 띄운다(거절하면 '뒤로' 로 홈 메뉴). 이미 연결돼 있으면
+    바로 홈 메뉴를 보여준다.
+    """
+    email = _user_email(chat_event)
+
+    connected = False
+    if email:
+        try:
+            from api._auth.user_oauth import verify_oauth_connection
+
+            connected = verify_oauth_connection(email)
+        except Exception:
+            connected = False
+
+    # 연결돼 있거나 이메일을 못 얻으면(동의 URL 구성 불가) 홈 메뉴로.
+    if connected or not email:
+        return build_home_menu_card(chat_event=chat_event, user_email=email)
+
+    from domains.weekly_meeting.cards import build_oauth_link_card
+    from domains.weekly_meeting.oauth_callback import (
+        build_authorization_url,
+        encode_state,
+    )
+
+    space_name = str(((chat_event or {}).get("space") or {}).get("name") or "")
+    url = build_authorization_url(
+        user_email_hint=email,
+        state=encode_state(user_email=email, space_name=space_name),
+    )
+    intro = (
+        "👋 <b>AllMeet</b>이에요! "
+        "지금은 <font color=\"#d93025\"><b>아직 연결되어 있지 않아요.</b></font> "
+        "아래 내용을 확인하고 연결해 주세요."
+    )
+    card = build_oauth_link_card(user_email=email, auth_url=url, intro=intro)
+    card["text"] = "AllMeet을 쓰려면 내 데이터(GWS) 연결이 필요해요."
+    return card
 
 
 def reply_with_home_menu(
@@ -256,6 +344,24 @@ def handle_home_menu_action(
 
     if fn == "hm_open_settings":
         return build_settings_hub_card(include_action_response=True)
+
+    if fn == "hm_oauth_link":
+        if not email:
+            return {"text": "사용자 이메일을 확인하지 못했어요."}
+        from domains.weekly_meeting.cards import build_oauth_link_card
+        from domains.weekly_meeting.oauth_callback import (
+            build_authorization_url,
+            encode_state,
+        )
+
+        space_name = str(((chat_event or {}).get("space") or {}).get("name") or "")
+        url = build_authorization_url(
+            user_email_hint=email,
+            state=encode_state(user_email=email, space_name=space_name),
+        )
+        return build_oauth_link_card(
+            user_email=email, auth_url=url, include_action_response=True
+        )
 
     if fn in {"hm_run_daily", "hm_run_info"}:
         prompt = parameters.get("prompt", "")

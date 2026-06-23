@@ -113,28 +113,32 @@ def build_personal_settings_card(
 ) -> dict[str, Any]:
     # 이미 연결된 사용자에겐 "연결됨" 상태를, 미연결/해제 상태엔 안내 문구를 보여준다.
     # 버튼은 상태와 무관하게 동일 — 재연결(만료/철회 복구)도 같은 버튼으로 진행.
-    from domains.daily_chat.home_menu import is_oauth_linked
+    from api._auth.user_oauth import verify_oauth_connection
 
-    if user_email and is_oauth_linked(user_email):
+    try:
+        linked = bool(user_email) and verify_oauth_connection(user_email)
+    except Exception:
+        linked = False
+    if linked:
         header_text = (
             "<b>개인설정</b><br>"
-            "✅ Gmail · 개인 Calendar · 내 Drive가 연결되어 있어요."
+            "✅ Gmail · 개인 Calendar · 내 Drive가 연결되어 있어요.<br>"
+            "<font color=\"#888888\">권한을 새로 받거나 만료·철회 후 복구하려면 아래에서 다시 연결하세요.</font>"
         )
+        link_button_label = "🔄 다시 연결 (GWS)"
     else:
         header_text = (
             "<b>개인설정</b><br>"
             "Gmail · 개인 Calendar · 내 Drive를 AllMeet와 연결합니다."
         )
+        link_button_label = "내 데이터 연결하기 (GWS)"
+    buttons = [_action_button(link_button_label, "st_oauth_link")]
+    if linked:
+        buttons.append(_action_button("🔓 연결 해지", "st_oauth_unlink"))
+    buttons.append(_action_button("설정으로", "hm_open_settings"))
     widgets: list[dict[str, Any]] = [
         {"textParagraph": {"text": header_text}},
-        {
-            "buttonList": {
-                "buttons": [
-                    _action_button("내 데이터 연결하기 (GWS)", "st_oauth_link"),
-                    _action_button("설정으로", "hm_open_settings"),
-                ]
-            }
-        },
+        {"buttonList": {"buttons": buttons}},
     ]
     out = _wrap_card(
         "st_personal_settings",
@@ -143,6 +147,43 @@ def build_personal_settings_card(
         include_action_response=include_action_response,
     )
     out["text"] = "개인설정입니다."
+    return out
+
+
+def build_oauth_unlink_confirm_card(
+    *, include_action_response: bool = False
+) -> dict[str, Any]:
+    """연결 해지 확인 카드 — 실수 방지용 1단계 확인.
+
+    해지하면 Google 측 토큰까지 폐기돼 다시 쓰려면 재동의가 필요하므로 확인을 받는다.
+    """
+    widgets: list[dict[str, Any]] = [
+        {
+            "textParagraph": {
+                "text": (
+                    "<b>연결을 해지할까요?</b><br>"
+                    "Gmail · 개인 Calendar · 내 Drive 연결이 끊기고, "
+                    "주간보고 초안·오늘의 할 일 등 개인 데이터 기반 기능을 쓸 수 없게 돼요.<br>"
+                    "<font color=\"#888888\">다시 쓰려면 동의(연결)를 새로 해야 합니다.</font>"
+                )
+            }
+        },
+        {
+            "buttonList": {
+                "buttons": [
+                    _action_button("🔓 해지하기", "st_oauth_unlink_confirm"),
+                    _action_button("취소", "st_open_personal"),
+                ]
+            }
+        },
+    ]
+    out = _wrap_card(
+        "st_oauth_unlink_confirm",
+        {"title": "AllMeet", "subtitle": "연결 해지"},
+        [{"widgets": widgets}],
+        include_action_response=include_action_response,
+    )
+    out["text"] = "연결을 해지할까요?"
     return out
 
 

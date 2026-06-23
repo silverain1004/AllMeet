@@ -663,9 +663,10 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
     html = update_week_range_in_schedule_table(html, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
     html = update_week_range_in_assignee_table(html, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
 
-    # 일정 공유 표 — 캘린더에서 일정 데이터 채우기 (출장/외근/재택/휴가)
-    # {{SCHEDULE}} → "일정 공유" 교체 후에 실행해야 테이블을 찾을 수 있음
+    # 일정 공유 표 데이터 (출장/외근/재택/휴가) — 신규 생성·기존 패치 양쪽에서 재사용
+    # {{SCHEDULE}} → "일정 공유" 교체 후라야 테이블을 찾을 수 있음
     vacation_cal_id = str(cfg.get("vacation_calendar_id") or VACATION_CALENDAR_ID or "")
+    vacation_map: dict[str, dict[str, str]] = {}
     if vacation_cal_id and member_names:
         logger.info("[%s] 휴가 캘린더: %s", team_id, vacation_cal_id)
         try:
@@ -673,13 +674,14 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
                 member_names, vacation_cal_id, reference_date,
                 team_members_cfg=cfg.get("team_members"),
             )
-            if vacation_map:
-                html = fill_schedule_table_vacations(html, vacation_map)
-                logger.info("[%s] 일정 공유 업데이트 완료: %s", team_id, list(vacation_map.keys()))
-            else:
-                logger.info("[%s] 일정 공유: 해당 주차 이벤트 없음", team_id)
         except Exception as exc:
-            logger.warning("[%s] 일정 공유 채우기 실패: %s", team_id, exc)
+            logger.warning("[%s] 일정 공유 조회 실패: %s", team_id, exc)
+
+    if vacation_map:
+        html = fill_schedule_table_vacations(html, vacation_map)
+        logger.info("[%s] 일정 공유 업데이트 완료: %s", team_id, list(vacation_map.keys()))
+    else:
+        logger.info("[%s] 일정 공유: 해당 주차 이벤트 없음", team_id)
 
     # 6) 잔여 플레이스홀더 제거
     html = re.sub(r"\{\{[A-Z0-9_]+\}\}", "", html)
@@ -691,11 +693,31 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
     if not space_key:
         raise RuntimeError(f"config/{team_id}: confluence_space_key 또는 space_key 가 없습니다.")
 
-    # 8) 기존 페이지 업데이트 / 없으면 신규 생성
+    # 8) 기존 페이지가 있으면 본문(사용자가 주중에 작성한 내용)은 보존하고
+    #    일정 공유 표·주차 날짜·진도율 칩 색상만 패치. 없으면 템플릿으로 신규 생성.
+    #    (매일 10시 스케줄러가 같은 reference_date 로 재실행돼도 작성 내용이 날아가지 않게 함)
     existing_id = _find_page_in_folder(client, quarter_id, title)
     if existing_id:
-        client.update_page(existing_id, title=title, html_content=html)
-        return f"기존 페이지 업데이트 완료: {title} (page_id={existing_id})"
+        try:
+            existing_page = client.get_page(existing_id, expand="body.storage")
+            existing_html = ((existing_page.get("body") or {}).get("storage") or {}).get("value") or ""
+        except Exception as e:
+            logger.warning("[%s] 기존 페이지 본문 조회 실패: %s", team_id, e)
+            existing_html = ""
+
+        # 본문 조회 실패 시에만 전체 재생성으로 폴백 (정상적이면 기존 본문 보존)
+        if not existing_html:
+            client.update_page(existing_id, title=title, html_content=html)
+            return f"기존 페이지 업데이트 완료(본문 조회 실패→재생성): {title} (page_id={existing_id})"
+
+        patched = existing_html
+        if vacation_map:
+            patched = fill_schedule_table_vacations(patched, vacation_map)
+        patched = update_week_range_in_schedule_table(patched, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
+        patched = update_week_range_in_assignee_table(patched, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
+        patched = apply_status_chip_colors(patched)
+        client.update_page(existing_id, title=title, html_content=patched)
+        return f"기존 페이지 패치 완료(본문 보존): {title} (page_id={existing_id})"
 
     page = client.create_page(title=title, html_content=html, parent_id=quarter_id, space_key=space_key)
     return f"페이지 생성 완료: {title} (page_id={page.get('id', '')})"
