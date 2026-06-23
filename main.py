@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 from enum import Enum
 from typing import Any
@@ -25,6 +24,11 @@ from domains.daily_chat import (
     reply_daily_chat,
     reply_with_home_menu,
 )
+from domains.agent import handle_agent_action, handle_agent_request, handle_agent_revision
+from domains.agent import store as agent_store
+from domains.agent.landing import wrap_with_agent_cta
+from domains.routing.context import load_ctx_block
+from domains.routing.intent import classify_intent, is_plan_revision
 from domains.expert_finder import handle_expert_finder
 from domains.schedule_management import (
     handle_schedule_management,
@@ -70,13 +74,14 @@ except Exception as _e:
 
 
 # ---------------------------------------------------------------------------
-# 의도 분류 (진입점 전용) — 키워드·패턴 기준. 나중에 LLM 분류로 바꿀 수 있음.
+# 의도 분류 — LLM + Firestore 대화 맥락 (domains.routing.intent)
 # ---------------------------------------------------------------------------
 
 
 class UserIntent(str, Enum):
     """아래 match/case 와 1:1로 매핑되는 의도."""
 
+    AGENT = "agent"
     DAILY_CHAT = "daily_chat"
     EXPERT_FINDER = "expert_finder"
     HOME_MENU = "home_menu"
@@ -86,161 +91,18 @@ class UserIntent(str, Enum):
     WEEKLY_REPORT_DRAFT = "weekly_report_draft"
 
 
-def match_user_intent(user_message: str) -> UserIntent:
-    """
-    사용자 메시지를 보고 어느 도메인으로 보낼지 결정합니다.
-
-    우선순위: 주간보고초안 > 설정(데이터 연결) > 주간 회의/등록 > 일정 > 전문가 > 일상.
-    덜 흔한 키워드를 먼저 매칭해 오탐을 줄입니다.
-    """
-    text = (user_message or "").strip().lower()
-    if not text:
+def match_user_intent(
+    user_message: str,
+    ctx_block: str = "",
+    *,
+    active_plan: dict[str, Any] | None = None,
+) -> UserIntent:
+    """LLM + 맥락 기반 intent 분류. 명시적 fast-path(설정·주간보고초안)만 키워드."""
+    label = classify_intent(user_message, ctx_block, active_plan=active_plan)
+    try:
+        return UserIntent(label)
+    except ValueError:
         return UserIntent.DAILY_CHAT
-
-    if _weekly_report_draft_like(text):
-        return UserIntent.WEEKLY_REPORT_DRAFT
-    if _settings_like(text):
-        return UserIntent.SETTINGS
-    if _home_menu_like(text):
-        return UserIntent.HOME_MENU
-    if _weekly_meeting_like(text):
-        return UserIntent.WEEKLY_MEETING
-    if _schedule_like(text):
-        return UserIntent.SCHEDULE_MANAGEMENT
-    if _expert_finder_like(text):
-        return UserIntent.EXPERT_FINDER
-
-    return UserIntent.DAILY_CHAT
-
-
-def _weekly_report_draft_like(text: str) -> bool:
-    """주간보고초안 트리거 — `_weekly_meeting_like` 보다 먼저 매칭 (더 구체적)."""
-    keywords = (
-        "주간보고초안",
-        "주간 보고 초안",
-        "주간보고 초안",
-        "a함수호출",
-        "a 함수호출",
-        "a 함수 호출",
-    )
-    return any(k in text for k in keywords)
-
-
-def _settings_like(text: str) -> bool:
-    """'설정' 단독 또는 '데이터 연결' 류 — OAuth 동의 카드 진입."""
-    stripped = text.strip()
-    if stripped in {"설정", "setting", "settings"}:
-        return True
-    keywords = (
-        "내 데이터 연결",
-        "데이터 연결",
-        "내 데이터연결",
-        "데이터연결",
-        "내 정보 연결",
-        "oauth 연결",
-        "oauth연결",
-    )
-    return any(k in stripped for k in keywords)
-
-
-def _home_menu_like(text: str) -> bool:
-    """인사·도움말·홈 메뉴 진입."""
-    stripped = text.strip()
-    if stripped in {
-        "안녕",
-        "안녕하세요",
-        "하이",
-        "hi",
-        "hello",
-        "홈",
-        "홈 메뉴",
-        "홈메뉴",
-        "메뉴",
-        "처음으로",
-        "도움말",
-        "help",
-    }:
-        return True
-    keywords = (
-        "뭐할수있어",
-        "뭐 할 수 있어",
-        "뭘 할 수 있어",
-        "무엇을 할 수 있",
-        "너 뭐할수있어",
-        "너 뭐 할 수 있어",
-        "할 수 있는 것",
-        "기능 알려",
-    )
-    return any(k in stripped for k in keywords)
-
-
-def _weekly_meeting_like(text: str) -> bool:
-    """주간 회의 / 팀·인원 등록 관련 표현."""
-    patterns = (
-        r"주간\s*회의",
-        r"주간회의",
-        r"주간\s*보고",
-        r"주간보고",
-        r"주간\s*업무",
-        r"주간업무",
-        r"주간\s*업무\s*보고",
-        r"주간업무보고",
-        r"세팅",
-        r"팀\s*등록",
-        r"인원\s*등록",
-        r"회의\s*실\s*등록",
-        r"주간\s*미팅",
-    )
-    return any(re.search(p, text) for p in patterns)
-
-
-def _schedule_like(text: str) -> bool:
-    """캘린더·미팅 예약·일정 관리."""
-    keywords = (
-        "캘린더",
-        "일정",
-        "예약",
-        "미팅 예약",
-        "회의 예약",
-        "예약해",
-        "스케줄",
-        "회의실",
-        "회의 잡",
-        "잡아줘",
-        "잡아 줘",
-        "빈 시간",
-        "가능 시간",
-        "가능한 시간",
-        "참석자",
-        "초대",
-        "calendar",
-        "schedule",
-        "meeting",
-    )
-    return any(k in text for k in keywords)
-
-
-def _expert_finder_like(text: str) -> bool:
-    """사내 전문가 추천·검색."""
-    keywords = (
-        "전문가",
-        "잘 아는 사람",
-        "잘 아는 분",
-        "잘 하는 사람",
-        "추천해",
-        "추천 좀",
-        "누가 잘해",
-        "누가 잘 알아",
-        "누가 알아",
-        "알려줄 사람",
-        "알려줄 분",
-        "담당자",
-        "고수",
-        "베테랑",
-        "마스터",
-        "expert",
-    )
-    return any(k in text for k in keywords)
 
 
 def _extract_user_message(payload: dict[str, Any]) -> str | None:
@@ -271,6 +133,8 @@ def _dispatch_by_intent(
     user_message: str,
     # 구글 챗 POST 본문 전체. type=MESSAGE 이면 Firestore conversations 로드·저장 (main 은 payload 만 넘김)
     payload: dict[str, Any],
+    *,
+    ctx_block: str = "",
 ) -> str | dict[str, Any]:
     """
     의도에 따라 해당 도메인 핸들러만 호출합니다.
@@ -282,6 +146,10 @@ def _dispatch_by_intent(
     새 도메인을 추가할 때 case 한 줄과 핸들러만 넣으면 되게 했습니다.
     """
     match intent:
+        case UserIntent.AGENT:
+            return handle_agent_request(
+                user_message, chat_event=payload, ctx_block=ctx_block
+            )
         case UserIntent.DAILY_CHAT:
             # 일상 대화: Vertex Gemini + Firestore 맥락 (domains.daily_chat.reply_daily_chat)
             return reply_daily_chat(user_message, chat_event=payload)
@@ -289,9 +157,13 @@ def _dispatch_by_intent(
             return reply_with_home_menu(user_message, chat_event=payload)
         case UserIntent.EXPERT_FINDER:
             # 사내 전문가 찾기: 키워드 추출 → 즉시 응답 + 백그라운드 검색 thread (domains.expert_finder)
-            return handle_expert_finder(user_message, chat_event=payload)
+            reply = handle_expert_finder(user_message, chat_event=payload)
+            return wrap_with_agent_cta(reply, user_message=user_message, intent_value="expert_finder")
         case UserIntent.SCHEDULE_MANAGEMENT:
-            return handle_schedule_management(user_message, chat_event=payload)
+            reply = handle_schedule_management(user_message, chat_event=payload)
+            return wrap_with_agent_cta(
+                reply, user_message=user_message, intent_value="schedule_management"
+            )
         case UserIntent.SETTINGS:
             return build_settings_hub_card()
         case UserIntent.WEEKLY_MEETING:
@@ -299,7 +171,10 @@ def _dispatch_by_intent(
             return handle_weekly_meeting(user_message, chat_event=payload)
         case UserIntent.WEEKLY_REPORT_DRAFT:
             # 주간보고초안: 즉시 응답 + 백그라운드 thread 가 데이터 수집·Vertex 분석 후 push
-            return handle_weekly_report_draft(user_message, chat_event=payload)
+            reply = handle_weekly_report_draft(user_message, chat_event=payload)
+            return wrap_with_agent_cta(
+                reply, user_message=user_message, intent_value="weekly_report_draft"
+            )
         case _:
             # Enum 전수 매칭이므로 이론상 도달하지 않음 — 폴백으로 일상 대화
             return reply_daily_chat(user_message, chat_event=payload)
@@ -479,6 +354,21 @@ def hello_http(request):
                 200,
                 {"Content-Type": "application/json; charset=utf-8"},
             )
+        if invoked_function and invoked_function.startswith("ag_"):
+            try:
+                reply = handle_agent_action(
+                    invoked_function=invoked_function,
+                    parameters=parameters,
+                    chat_event=payload,
+                )
+            except Exception:
+                logger.exception("agent action failed: invoked_function=%s", invoked_function)
+                reply = {"text": "에이전트 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}
+            return (
+                json.dumps(reply, ensure_ascii=False),
+                200,
+                {"Content-Type": "application/json; charset=utf-8"},
+            )
         if invoked_function and invoked_function.startswith("st_"):
             try:
                 reply = handle_settings_action(
@@ -610,10 +500,29 @@ def hello_http(request):
             {"Content-Type": "application/json; charset=utf-8"},
         )
 
-    # 질문/발화 → 의도 → 도메인 핸들러
-    intent = match_user_intent(user_message)
-    logger.info("intent=%s message=%s", intent.value, user_message[:200])
-    reply = _dispatch_by_intent(intent, user_message, payload)
+    # 질문/발화 → 맥락 로드 → intent → 도메인 핸들러
+    ctx_block = load_ctx_block(payload)
+    user_email = str(((payload.get("user") or {}).get("email") or "")).strip()
+    space_name = str(((payload.get("space") or {}).get("name") or "")).strip()
+
+    active_plan = (
+        agent_store.find_active_plan(user_email, space_name)
+        if user_email and space_name
+        else None
+    )
+    if active_plan and is_plan_revision(user_message, active_plan, ctx_block):
+        reply = handle_agent_revision(
+            user_message,
+            chat_event=payload,
+            existing_plan=active_plan,
+            ctx_block=ctx_block,
+        )
+    else:
+        intent = match_user_intent(user_message, ctx_block, active_plan=active_plan)
+        logger.info("intent=%s message=%s", intent.value, user_message[:200])
+        reply = _dispatch_by_intent(
+            intent, user_message, payload, ctx_block=ctx_block
+        )
 
     # Google Chat 동기 응답은 REST Message 스키마만 인정 (text, cardsV2, accessoryWidgets 등).
     # 스키마에 없는 키(예: intent)를 넣으면 HTTP 200이어도 "무효한 메시지 페이로드"로 처리되어

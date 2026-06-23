@@ -8,6 +8,8 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from api.chat.loading import loading_text
+
 _FOOTER_TEXT = (
     "💡 검색 범위: 사내 공용 Drive · Confluence · 공용 Calendar + "
     "'내 데이터 연결' 동의자의 Gmail 메타 · 개인 Calendar. "
@@ -15,19 +17,18 @@ _FOOTER_TEXT = (
 )
 
 
-# 즉시 응답 — 백그라운드 검색이 끝날 때까지 보여주는 안내 카드.
 def build_in_progress_card(query: str) -> dict[str, Any]:
     """즉시 응답 카드. ``query`` 는 추출된 키워드(있으면).
 
     chat ``text`` 필드는 마크다운만 지원 (``*굵게*``, ``_기울임_``, `` `코드` ``).
-    HTML 태그(``<b>``)는 raw 로 노출되므로 사용 금지.
     """
     q = (query or "").strip()
     if q:
-        text = f"🔍 *{q}* 분야 전문가를 찾는 중이에요. 잠시 후 결과를 보내드릴게요."
+        out = loading_text(f"{q} 분야 전문가를 찾는 중이에요. 잠시 후 결과를 보내드릴게요.", prefix="🔍")
+        out["text"] = f"🔍 *{q}* 분야 전문가를 찾는 중이에요. 잠시 후 결과를 보내드릴게요."
     else:
-        text = "🔍 전문가를 찾는 중이에요. 잠시 후 결과를 보내드릴게요."
-    return {"text": text}
+        out = loading_text("전문가를 찾는 중이에요. 잠시 후 결과를 보내드릴게요.", prefix="🔍")
+    return out
 
 
 # 키워드 추출 실패 — 사용자가 다시 입력하도록 예시 안내.

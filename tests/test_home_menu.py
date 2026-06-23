@@ -9,17 +9,36 @@ import pytest
 
 
 def _home_buttons(card: dict[str, Any]) -> list[dict[str, Any]]:
+    """카드 내 모든 buttonList 의 버튼을 순서대로 반환."""
     widgets = card["cardsV2"][0]["card"]["sections"][0]["widgets"]
+    out: list[dict[str, Any]] = []
     for w in widgets:
         if "buttonList" in w:
-            return w["buttonList"]["buttons"]
-    return []
+            out.extend(w["buttonList"]["buttons"])
+    return out
 
 
 def _button_params(button: dict[str, Any]) -> dict[str, str]:
     action = button["onClick"]["action"]
     params = action.get("parameters") or []
     return {p["key"]: p["value"] for p in params}
+
+
+def test_build_home_menu_card_shows_full_random_prompts():
+    from domains.daily_chat.home_menu import build_home_menu_card
+
+    daily = "퇴근 후 가볍게 할 수 있는 스트레칭 루틴 알려줘"
+    info = "오늘 미국 증시 마감 요약해줘"
+    card = build_home_menu_card(daily_prompt=daily, info_prompt=info)
+    body = str(card)
+    assert daily in body
+    assert info in body
+    buttons = _home_buttons(card)
+    assert len(buttons) == 6
+    assert _button_params(buttons[0])["prompt"] == daily
+    assert _button_params(buttons[1])["prompt"] == info
+    assert "스트레칭" in buttons[0]["text"]
+    assert "이 질문하기" not in buttons[0]["text"]
 
 
 def test_build_home_menu_card_has_six_buttons_with_prompts():
@@ -76,7 +95,7 @@ def test_dispatch_home_menu_calls_combo():
     assert out is combo
 
 
-def test_hm_run_daily_calls_reply_with_prompt():
+def test_hm_run_daily_returns_loading_when_space_present():
     from domains.daily_chat.home_menu import handle_home_menu_action
 
     chat_event = {
@@ -84,6 +103,21 @@ def test_hm_run_daily_calls_reply_with_prompt():
         "user": {"email": "u@example.com"},
         "space": {"name": "spaces/AAA"},
     }
+    with patch("api.chat.loading.start_background") as bg:
+        out = handle_home_menu_action(
+            invoked_function="hm_run_daily",
+            parameters={"prompt": "점심 메뉴 추천해줘"},
+            chat_event=chat_event,
+        )
+    bg.assert_called_once()
+    assert out.get("actionResponse") == {"type": "UPDATE_MESSAGE"}
+    assert "⏳" in out.get("text", "")
+
+
+def test_hm_run_daily_sync_without_space():
+    from domains.daily_chat.home_menu import handle_home_menu_action
+
+    chat_event = {"type": "CARD_CLICKED", "user": {"email": "u@example.com"}}
     with patch("domains.daily_chat.home_menu.reply_daily_chat", return_value="답변입니다") as mock_reply:
         out = handle_home_menu_action(
             invoked_function="hm_run_daily",
@@ -92,8 +126,6 @@ def test_hm_run_daily_calls_reply_with_prompt():
         )
     assert out == {"text": "답변입니다"}
     mock_reply.assert_called_once()
-    assert mock_reply.call_args[0][0] == "점심 메뉴 추천해줘"
-    assert mock_reply.call_args[1]["chat_event"]["type"] == "MESSAGE"
 
 
 def test_hm_weekly_draft_blocks_without_oauth():

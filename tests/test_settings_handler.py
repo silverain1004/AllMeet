@@ -64,9 +64,10 @@ def test_legacy_wm_open_team_menu_redirects():
 def test_home_menu_intent_triggers_home_card():
     from main import UserIntent, match_user_intent
 
-    assert match_user_intent("홈 메뉴") == UserIntent.HOME_MENU
-    assert match_user_intent("안녕") == UserIntent.HOME_MENU
-    assert match_user_intent("너 뭐할수있어") == UserIntent.HOME_MENU
+    with patch("main.classify_intent", return_value="home_menu"):
+        assert match_user_intent("홈 메뉴") == UserIntent.HOME_MENU
+        assert match_user_intent("안녕") == UserIntent.HOME_MENU
+        assert match_user_intent("너 뭐할수있어") == UserIntent.HOME_MENU
 
 
 def _chat_event():

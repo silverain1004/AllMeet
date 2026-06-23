@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from api.chat.loading import ICON_ACTIVE, ICON_DONE, ICON_PENDING
 from api.chat.messages import create_message_in_space, update_message_in_space
 
-# 단계별 상태 아이콘.
-_ICON = {"done": "✅", "active": "⏳", "pending": "▫️"}
+# 단계별 상태 아이콘 — loading.py 와 통일.
+_ICON = {"done": ICON_DONE, "active": ICON_ACTIVE, "pending": ICON_PENDING}
 
 
 class LiveProgress:

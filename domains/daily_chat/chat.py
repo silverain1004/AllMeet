@@ -1,8 +1,8 @@
 """
 일상 대화:
-- 능력·기능 질문 → 고정 WHAT_I_CAN_DO_TEXT
 - 최신 정보 필요(주가·뉴스 등) → Google Search + Gemini (google-genai)
 - 그 외 → Vertex Gemini
+홈·기능 안내는 main UserIntent.HOME_MENU → reply_with_home_menu 경로.
 구글 챗 MESSAGE + 유효 space 이면 Firestore 연동(스키마는 conversation_store, 공통 CRUD는 firestore.documents).
 """
 
@@ -31,17 +31,13 @@ WHAT_I_CAN_DO_TEXT = (
     "그 외에도 필요하시면 편하게 말씀해 주세요."
 )
 
-_CAPABILITIES_CRITERIA = (
-    "사용자가 All-Meet(봇)이 무엇을 할 수 있는지·어떤 기능이 있는지·업무로 무엇을 도와줄 수 있는지 묻는 의도이면 yes.\n"
-    "그 외(일상 대화, 이야기, 다른 주제, 봇 기능과 무관한 말)면 no."
-)
 _WEB_SEARCH_CRITERIA = (
     "사용자 질문에 답하려면 **최신 웹 검색**(실시간 주가·시세, 환율, 최신 뉴스, 오늘 날씨, 최근 지표 등 지금 시점의 정보)이 필요하면 yes.\n"
     "일상 잡담, 감정 대화, 또는 모델 일반 지식만으로 충분하면 no."
 )
 
 
-# 함수 — LLM yes/no 분류 공통(역할·웹검색 판단에서 재사용).
+# 함수 — LLM yes/no 분류 공통(웹검색 판단에서 재사용).
 def _yes_no_classify(user_message: str, ctx_block: str, *, criteria: str, log_fail: str) -> bool:
     msg = (user_message or "").strip()
     if not msg:
@@ -68,17 +64,6 @@ def _yes_no_classify(user_message: str, ctx_block: str, *, criteria: str, log_fa
     except Exception as e:
         logger.warning(log_fail, e)
         return False
-
-
-# 함수 — 사용자가 봇 능력·기능을 묻는지 LLM으로 판별.
-def _user_asks_capabilities(user_message: str, ctx_block: str) -> bool:
-    """봇이 뭘 할 수 있냐는 질문이면 True. 실패 시 False(일반 대화로 처리)."""
-    return _yes_no_classify(
-        user_message,
-        ctx_block,
-        criteria=_CAPABILITIES_CRITERIA,
-        log_fail="_user_asks_capabilities 실패, 일반 대화로 처리: %s",
-    )
 
 
 # 함수 — 웹 검색이 필요한 질문인지 LLM으로 판별.
@@ -224,12 +209,8 @@ def reply_daily_chat(
         if block:
             ctx_block = f"\n[최근 대화]\n{block}\n"
 
-    # 4. 분기: 기능 안내 / 웹 검색 / Vertex Gemini 일상 대화
-    if _user_asks_capabilities(msg, ctx_block):
-        from domains.daily_chat.home_menu import build_home_menu_card
-
-        return build_home_menu_card(chat_event=chat_event)
-    elif _needs_web_search(msg, ctx_block):
+    # 4. 분기: 웹 검색 / Vertex Gemini 일상 대화 (홈·기능 안내는 main HOME_MENU intent)
+    if _needs_web_search(msg, ctx_block):
         out = _answer_with_google_search(msg, ctx_block)
     else:
         if ctx_block.strip():

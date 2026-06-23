@@ -6,13 +6,15 @@ import html
 import re
 from typing import Any, Callable
 
+from api.chat.loading import loading_text
+
 # task 끝의 진행률 표기 — ' -%' 또는 ' 100%', ' 50%' 등. 시각 강조용 분리에 사용.
 _PROGRESS_SUFFIX_RE = re.compile(r"\s+(-%|\d{1,3}%)\s*$")
 
 
 def build_in_progress_card() -> dict[str, Any]:
     """즉시 응답용 — '분석 중' 안내."""
-    return {"text": "주간보고초안 분석 중이에요. 잠시 후 결과를 보내드릴게요."}
+    return loading_text("주간보고초안 분석 중이에요. 잠시 후 결과를 보내드릴게요.")
 
 
 def build_team_not_found_card(user_email: str) -> dict[str, Any]:

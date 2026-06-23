@@ -100,15 +100,24 @@ def _conf_text(team_name: str, data: dict[str, Any]) -> str:
 
 def build_weekly_meeting_menu_card(*, include_action_response: bool = False) -> dict[str, Any]:
     widgets = [
-        {"textParagraph": {"text": "<b>주간회의/주간보고 메뉴</b><br>원하는 작업을 선택해 주세요."}},
+        {
+            "textParagraph": {
+                "text": (
+                    "<b>주간회의/주간보고</b><br>"
+                    "일정 조회는 여기서, 팀·컨플루언스·OAuth 등 설정은 <b>설정</b> 메뉴에서 관리해요."
+                )
+            }
+        },
         {
             "buttonList": {
                 "buttons": [
                     {"text": "1. 일정 조회", "onClick": {"action": {"function": "wm_open_schedule_menu"}}},
-                    {"text": "2. 팀 설정", "onClick": {"action": {"function": "wm_open_team_menu"}}},
-                    {"text": "3. 팀원 설정", "onClick": {"action": {"function": "wm_open_member_menu"}}},
-                    {"text": "4. 컨플루언스 설정", "onClick": {"action": {"function": "wm_open_conf_menu"}}},
-                    {"text": "5. 스케줄러", "onClick": {"action": {"function": "wm_open_scheduler"}}},
+                    {"text": "⚙️ 설정", "onClick": {"action": {"function": "hm_open_settings"}}},
+                    # --- 구 설정 메뉴 (domains.settings 로 통합) ---
+                    # {"text": "2. 팀 설정", "onClick": {"action": {"function": "wm_open_team_menu"}}},
+                    # {"text": "3. 팀원 설정", "onClick": {"action": {"function": "wm_open_member_menu"}}},
+                    # {"text": "4. 컨플루언스 설정", "onClick": {"action": {"function": "wm_open_conf_menu"}}},
+                    # {"text": "5. 스케줄러", "onClick": {"action": {"function": "wm_open_scheduler"}}},
                 ]
             }
         },
@@ -116,48 +125,44 @@ def build_weekly_meeting_menu_card(*, include_action_response: bool = False) -> 
     return _wrap_card("wm_main_menu", {"title": "AllMeet", "subtitle": "주간회의/주간보고"}, widgets, include_action_response=include_action_response)
 
 
-def build_settings_entry_card(
-    *,
-    user_email: str = "",
-    is_welcome: bool = False,
-    include_action_response: bool = False,
-) -> dict[str, Any]:
-    """'설정' 키워드 진입 카드 + ADDED_TO_SPACE 환영용.
-
-    Gmail / 개인 Calendar / 내 Drive 사용을 위한 OAuth 동의를 안내. ``is_welcome=True`` 면
-    봇이 처음 스페이스에 추가됐을 때의 환영 문구도 함께.
-    """
-    if is_welcome:
-        intro = (
-            "<b>All-Meet 가 추가됐어요 👋</b><br>"
-            "Gmail · 개인 Calendar · 내 Drive 활동을 주간보고초안에 함께 반영하려면 "
-            "<b>내 데이터 연결</b> 한 번이 필요해요. (한 번만 동의하면 됩니다)<br><br>"
-            "<i>아래 버튼을 눌러 동의 화면을 여세요. 이후엔 '설정' 이라고 보내면 다시 이 카드가 나옵니다.</i>"
-        )
-    else:
-        intro = (
-            "<b>설정 — 내 데이터 연결</b><br>"
-            "Gmail · 개인 Calendar · 내 Drive 활동을 주간보고초안에서 사용하려면 동의가 필요해요."
-        )
-    widgets = [
-        {"textParagraph": {"text": intro}},
-        {
-            "buttonList": {
-                "buttons": [
-                    {
-                        "text": "🔗 내 데이터 연결 (Gmail/Calendar/Drive)",
-                        "onClick": {"action": {"function": "wm_oauth_link"}},
-                    },
-                ]
-            }
-        },
-    ]
-    return _wrap_card(
-        "wm_settings_entry",
-        {"title": "AllMeet", "subtitle": "설정"},
-        widgets,
-        include_action_response=include_action_response,
-    )
+# def build_settings_entry_card(
+#     *,
+#     user_email: str = "",
+#     is_welcome: bool = False,
+#     include_action_response: bool = False,
+# ) -> dict[str, Any]:
+#     """[비활성] 구 주간업무 OAuth 설정 진입 카드 — domains.settings.build_personal_settings_card 로 대체."""
+#     if is_welcome:
+#         intro = (
+#             "<b>All-Meet 가 추가됐어요 👋</b><br>"
+#             "Gmail · 개인 Calendar · 내 Drive 활동을 주간보고초안에 함께 반영하려면 "
+#             "<b>내 데이터 연결</b> 한 번이 필요해요. (한 번만 동의하면 됩니다)<br><br>"
+#             "<i>아래 버튼을 눌러 동의 화면을 여세요. 이후엔 '설정' 이라고 보내면 다시 이 카드가 나옵니다.</i>"
+#         )
+#     else:
+#         intro = (
+#             "<b>설정 — 내 데이터 연결</b><br>"
+#             "Gmail · 개인 Calendar · 내 Drive 활동을 주간보고초안에서 사용하려면 동의가 필요해요."
+#         )
+#     widgets = [
+#         {"textParagraph": {"text": intro}},
+#         {
+#             "buttonList": {
+#                 "buttons": [
+#                     {
+#                         "text": "🔗 내 데이터 연결 (Gmail/Calendar/Drive)",
+#                         "onClick": {"action": {"function": "wm_oauth_link"}},
+#                     },
+#                 ]
+#             }
+#         },
+#     ]
+#     return _wrap_card(
+#         "wm_settings_entry",
+#         {"title": "AllMeet", "subtitle": "설정"},
+#         widgets,
+#         include_action_response=include_action_response,
+#     )
 
 
 def build_oauth_link_card(

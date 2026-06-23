@@ -37,6 +37,18 @@ _LABEL_SUFFIX_RE = re.compile(
 )
 
 
+def _button_label(prompt: str, *, max_len: int = 48) -> str:
+    """버튼 라벨 — 접미사만 제거하고 넉넉한 길이까지 유지."""
+    label = _LABEL_SUFFIX_RE.sub("", (prompt or "").strip()).strip()
+    if len(label) > max_len:
+        label = label[: max_len - 1].rstrip() + "…"
+    return label or "질문"
+
+
+def _space_name(chat_event: dict[str, Any] | None) -> str:
+    return str(((chat_event or {}).get("space") or {}).get("name") or "").strip()
+
+
 def _wrap_card(
     card_id: str,
     header: dict[str, Any],
@@ -58,13 +70,6 @@ def _wrap_card(
     if include_action_response:
         out["actionResponse"] = {"type": "UPDATE_MESSAGE"}
     return out
-
-
-def _short_label(prompt: str, *, max_len: int = 18) -> str:
-    label = _LABEL_SUFFIX_RE.sub("", (prompt or "").strip()).strip()
-    if len(label) > max_len:
-        label = label[: max_len - 1] + "…"
-    return label or "질문"
 
 
 def _action_button(
@@ -124,12 +129,12 @@ def build_home_menu_card(
             "buttonList": {
                 "buttons": [
                     _action_button(
-                        f"🎲 {_short_label(daily)}",
+                        f"🎲 {_button_label(daily)}",
                         "hm_run_daily",
                         parameters={"prompt": daily},
                     ),
                     _action_button(
-                        f"🎲 {_short_label(info)}",
+                        f"🎲 {_button_label(info)}",
                         "hm_run_info",
                         parameters={"prompt": info},
                     ),
@@ -224,6 +229,18 @@ def _run_prompt(prompt: str, chat_event: dict[str, Any] | None) -> dict[str, Any
     return {"text": answer}
 
 
+def _run_prompt_background(prompt: str, chat_event: dict[str, Any], space_name: str) -> None:
+    try:
+        out = _run_prompt(prompt, chat_event)
+        from api.chat.messages import post_message_to_space
+
+        post_message_to_space(space_name=space_name, payload=out if isinstance(out, dict) else {"text": str(out)})
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("hm_run_prompt background 실패", exc_info=True)
+
+
 def handle_home_menu_action(
     *,
     invoked_function: str,
@@ -241,7 +258,14 @@ def handle_home_menu_action(
         return build_settings_hub_card(include_action_response=True)
 
     if fn in {"hm_run_daily", "hm_run_info"}:
-        return _run_prompt(parameters.get("prompt", ""), chat_event)
+        prompt = parameters.get("prompt", "")
+        space_name = _space_name(chat_event)
+        if space_name and (prompt or "").strip():
+            from api.chat.loading import loading_update, start_background
+
+            start_background(_run_prompt_background, prompt, chat_event, space_name)
+            return loading_update("답변을 준비하는 중이에요…")
+        return _run_prompt(prompt, chat_event)
 
     if fn == "hm_expert":
         from domains.expert_finder import handle_expert_finder
