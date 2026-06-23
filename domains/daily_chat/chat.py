@@ -129,11 +129,19 @@ def welcome_with_capabilities_text() -> str:
 
 
 # 함수 — 구글 챗 이벤트 JSON에서 space_id, 표시명, user_context 추출.
-def _parse_google_chat_payload(payload: dict[str, Any]) -> tuple[str, str | None, dict[str, str]]:
-    """구글 챗 이벤트 JSON에서 space_id, 표시명, user_context 튜플로 추출."""
-    space_name = (payload.get("space") or {}).get("name") or ""
+def _parse_google_chat_payload(
+    payload: dict[str, Any],
+) -> tuple[str, str | None, dict[str, str], str]:
+    """구글 챗 이벤트 JSON에서 space_id, 표시명, user_context, space_type 튜플로 추출.
+
+    space_type 은 이벤트의 ``space.type`` ("DM"/"ROOM") — 스케줄 발송이 개인 DM만
+    골라가도록 conversations 문서에 저장하는 데 쓴다. 없으면 빈 문자열.
+    """
+    space = payload.get("space") or {}
+    space_name = space.get("name") or ""
     space_id = space_name.replace("spaces/", "").strip() if space_name else ""
     space_id = space_id or "unknown"
+    space_type = str(space.get("type") or "").strip()
 
     user = payload.get("user") or {}
     display = (user.get("displayName") or "").strip() if isinstance(user.get("displayName"), str) else ""
@@ -143,7 +151,7 @@ def _parse_google_chat_payload(payload: dict[str, Any]) -> tuple[str, str | None
         "department": (user.get("department") or "").strip() or "미지정",
         "email": (user.get("email") or "").strip() or "",
     }
-    return space_id, (display or None), ctx
+    return space_id, (display or None), ctx, space_type
 
 
 # 함수 — Vertex GenerativeModel 싱글톤(첫 호출 시 초기화).
@@ -193,9 +201,11 @@ def reply_daily_chat(
 
     # 2. MESSAGE + 유효 space면 Firestore 루트 보장·user_context 반영
     if chat_event and chat_event.get("type") == "MESSAGE":
-        space_id, user_display_name, user_ctx = _parse_google_chat_payload(chat_event)
+        space_id, user_display_name, user_ctx, space_type = _parse_google_chat_payload(chat_event)
         if space_id != "unknown":
-            conversation_context = conv.ensure_conversation(space_id, user_display_name, user_ctx)
+            conversation_context = conv.ensure_conversation(
+                space_id, user_display_name, user_ctx, space_type=space_type or None,
+            )
 
     # 3. 최근 대화 로드 → 프롬프트용 ctx_block
     ctx_block = ""
@@ -225,6 +235,12 @@ def reply_daily_chat(
                 아래 사용자 메시지에 대해 친근하고 자연스러운 한국어로 답하세요.
                 업무 도구를 쓰라고 강요하지 말고, 일상 대화·질문에는 직접 답변하세요.
                 응답은 2~6문장 정도로 적당히 짧게 유지하고, 의미 단위마다 빈 줄로 단락을 나누어 읽기 쉽게 쓰세요.
+
+                [내가 할 수 있는 업무]
+                {WHAT_I_CAN_DO_TEXT}
+                "뭘 할 수 있냐"·"기능"·도움 요청처럼 능력을 묻는 질문이면 위 목록을 바탕으로 안내하고,
+                사용자 요청이 위 업무 중 하나에 맞으면 어떤 기능으로 도와줄 수 있는지 자연스럽게 짚어 주세요.
+                (단, 위에 없는 업무를 지어내지 마세요.)
                 {recent_hint}{ctx_block}
                 사용자 메시지: "{msg}"
               """

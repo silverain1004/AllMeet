@@ -33,6 +33,23 @@ logger = logging.getLogger(__name__)
 _vertex_lock = threading.Lock()
 _vertex_model_select = None
 
+# 개인 사진·미디어 파일은 할일과 무관 — 파일명만으로는 LLM이 noise로 거르지 못해
+# (noise 기준이 메일/알림 위주라) FYI로 새어 나간다. 수집 단계에서 확장자로 결정적 제거.
+_MEDIA_EXTENSIONS = {
+    ".heic", ".heif", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff",
+    ".mov", ".mp4", ".m4v", ".avi", ".mkv", ".wmv", ".hevc",
+}
+
+
+def _is_media_file(f: dict) -> bool:
+    name = str(f.get("name") or "").lower()
+    return any(name.endswith(ext) for ext in _MEDIA_EXTENSIONS)
+
+
+def _drop_media_files(files: list[dict]) -> list[dict]:
+    """개인 사진/동영상 파일 제거 — 할일 브리핑 대상이 아님."""
+    return [f for f in files if not _is_media_file(f)]
+
 
 # ---------------------------------------------------------------------------
 # 시간 범위
@@ -151,7 +168,7 @@ def _collect_drive(
                     user_email=user_email,
                 )
                 if res.ok:
-                    for f in _only_my_modifications(res.files, user_email):
+                    for f in _drop_media_files(_only_my_modifications(res.files, user_email)):
                         fid = str(f.get("id") or "")
                         if fid and fid not in seen:
                             seen.add(fid)
@@ -177,7 +194,7 @@ def _collect_drive(
             user_email=user_email,
         )
         if res.ok:
-            raw["personal_drive"] = _only_my_modifications(res.files, user_email)
+            raw["personal_drive"] = _drop_media_files(_only_my_modifications(res.files, user_email))
         else:
             errors["personal_drive"] = res.error_kind or "unknown"
     except Exception as e:
@@ -250,7 +267,7 @@ def _select_items_needing_body(raw: dict[str, Any]) -> dict[str, list[str]]:
         res = model.generate_content(
             prompt,
             generation_config=GenerationConfig(
-                temperature=0.1,
+                temperature=0.0,  # 본문 필요 ID 선별은 순수 분류 — 재현성 위해 0
                 max_output_tokens=1024,
                 response_mime_type="application/json",
                 response_schema=SELECT_SCHEMA,

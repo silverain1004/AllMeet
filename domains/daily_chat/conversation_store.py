@@ -45,10 +45,13 @@ def ensure_conversation(
     space_id: str,
     user_name: str | None,
     user_context: dict[str, str] | None,
+    space_type: str | None = None,
 ) -> dict[str, Any]:
     """대화 루트 문서가 없으면 생성하고, 있으면 ``updated_at`` 만 갱신한다.
 
     최초 생성 시 ``user_context`` 가 있으면 루트 필드 ``user_context`` 에 저장한다.
+    ``space_type`` ("DM"/"ROOM")은 스케줄 발송이 개인 DM만 골라가도록 구분용으로
+    저장한다. 갱신 경로에도 함께 써서, 필드 없는 기존 문서는 다음 대화 때 자동 백필된다.
     반환 ``{}`` 는 호출부에서 “Firestore 맥락 로드 경로로 진입했음” 표시용.
     """
     ref = document_ref(COLLECTION, conversation_doc_id(space_id, user_name))
@@ -60,7 +63,11 @@ def ensure_conversation(
     }
     if user_context:
         create_data["user_context"] = user_context
-    ensure_document(ref, create_data=create_data, update_on_exists={"updated_at": now})
+    update_on_exists: dict[str, Any] = {"updated_at": now}
+    if space_type:
+        create_data["space_type"] = space_type
+        update_on_exists["space_type"] = space_type
+    ensure_document(ref, create_data=create_data, update_on_exists=update_on_exists)
     return {}
 
 

@@ -364,24 +364,52 @@ def _send_draft_to_user(
         return "skipped_error"
 
 
-def _get_space_name_by_email(user_email: str) -> str | None:
-    """Firestore conversations 에서 이메일로 space_name('spaces/XXX') 조회."""
+def _get_dm_space_name_by_email(user_email: str) -> str | None:
+    """선제 알림용 — 사용자의 개인 DM space_name('spaces/XXX')만 반환. 없으면 None.
+
+    선제 발송(주간보고 초안·일일 브리핑·Confluence 리마인드)은 사용자가 부르지 않았는데
+    봇이 먼저 쏘는 알림이라, **반드시 개인 DM 으로만** 가야 한다. 같은 사용자라도 팀룸 등
+    그룹 스페이스에서 봇을 부르면 conversations 문서가 따로 생기는데, 거기에 주간보고 초안
+    같은 걸 쏘면 팀 전체에 노출돼 곤란하다.
+
+    그래서 ``space_type=="DM"`` 문서만 후보로 쓰고(여러 개면 최신 updated_at), DM 문서가
+    하나도 없으면 None 을 돌려 **발송을 건너뛴다** — 그룹 스페이스로 새느니 안 보내는 게 맞다.
+    (반응형 기능(전문가찾기 등)은 이벤트의 space 를 직접 쓰므로 이 함수와 무관.)
+
+    space_type 미태깅 기존 문서는 후보에서 빠진다 — 사용자가 DM 에서 한 번 대화하면 자동
+    태깅되어 정상 발송된다(테스트 단계라 기존 conversations 를 비우고 재생성하는 방식).
+    """
     try:
         from firestore import get_client
         db = get_client()
+        # email 동등 필터만(자동 인덱스) 받아서 DM 선별·최신선택은 파이썬에서 — 복합 인덱스 불필요.
         docs = list(
             db.collection(_CONVERSATIONS_COLLECTION)
             .where("user_context.email", "==", user_email)
-            .limit(1)
             .stream()
         )
-        if not docs:
+        rows = [d.to_dict() or {} for d in docs]
+        dm_rows = [r for r in rows if str(r.get("space_type") or "").upper() == "DM"]
+        if not dm_rows:
+            logger.info("[auto_notify] DM space 없음(선제발송 스킵): %s", user_email)
             return None
-        data = docs[0].to_dict() or {}
-        space_id = str(data.get("space_id") or "").strip()
+
+        def _updated_key(r: dict[str, Any]) -> float:
+            ts = r.get("updated_at")
+            try:
+                return ts.timestamp()  # Firestore datetime
+            except Exception:
+                return 0.0
+
+        best = max(dm_rows, key=_updated_key)
+        space_id = str(best.get("space_id") or "").strip()
         if not space_id:
             return None
         return space_id if space_id.startswith("spaces/") else f"spaces/{space_id}"
     except Exception as e:
-        logger.warning("[auto_notify] space_id 조회 실패 user=%s: %s", user_email, e)
+        logger.warning("[auto_notify] DM space 조회 실패 user=%s: %s", user_email, e)
         return None
+
+
+# 하위호환 별칭 — 기존 import 경로 유지. 선제발송 전용 DM 조회이므로 위 함수가 본체.
+_get_space_name_by_email = _get_dm_space_name_by_email
