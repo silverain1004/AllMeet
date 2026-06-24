@@ -144,6 +144,23 @@ def _should_consume_clarification(
     return True
 
 
+def _strip_bot_mentions(text: str, message: dict[str, Any]) -> str:
+    """argumentText 가 없을 때의 폴백 — annotations 의 봇 멘션 텍스트를 본문에서 제거.
+
+    Room 멘션 시 text 앞에 "@AllMeet" 같은 봇 표시명이 붙는데, 이게 전문가 검색
+    키워드 등으로 흘러가지 않도록 USER_MENTION(BOT) 어노테이션의 displayName 을 제거한다.
+    """
+    out = text or ""
+    for ann in message.get("annotations") or []:
+        if not isinstance(ann, dict) or ann.get("type") != "USER_MENTION":
+            continue
+        user = (ann.get("userMention") or {}).get("user") or {}
+        name = str(user.get("displayName") or "").strip()
+        if name:
+            out = out.replace(f"@{name}", " ").replace(name, " ")
+    return out
+
+
 def _extract_user_message(payload: dict[str, Any]) -> str | None:
     """
     요청 본문에서 사용자 발화 한 줄을 꺼냅니다.
@@ -156,9 +173,15 @@ def _extract_user_message(payload: dict[str, Any]) -> str | None:
 
     # 구글 챗 (참고 에이전트 main.py 와 동일한 이벤트 형태)
     if payload.get("type") == "MESSAGE":
-        text = (payload.get("message") or {}).get("text")
+        message = payload.get("message") or {}
+        # Room 에서 봇을 멘션하면 text 에는 "@AllMeet ..." 처럼 봇 멘션이 그대로 남는다.
+        # argumentText 는 봇 멘션을 제거한 순수 발화(DM 에서는 text 와 동일)이므로 이를 우선한다.
+        arg_text = message.get("argumentText")
+        if arg_text is not None and str(arg_text).strip():
+            return str(arg_text).strip()
+        text = message.get("text")
         if text is not None:
-            return str(text).strip()
+            return _strip_bot_mentions(str(text), message).strip()
 
     for key in ("user_message", "text", "query", "message"):
         if key in payload and payload[key] is not None:

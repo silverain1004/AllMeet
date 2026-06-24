@@ -16,7 +16,7 @@ def parse_chat_identity(
 ) -> tuple[str, str | None, str, str]:
     """(space_id, user_display_name, user_email, space_name) 반환."""
     payload = chat_event or {}
-    space_id, user_display_name, user_ctx = _parse_google_chat_payload(payload)
+    space_id, user_display_name, user_ctx, _ = _parse_google_chat_payload(payload)
     user = payload.get("user") or {}
     user_email = str(user.get("email") or user_ctx.get("email") or "").strip()
     space_name = str((payload.get("space") or {}).get("name") or "").strip()
