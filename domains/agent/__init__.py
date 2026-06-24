@@ -4,6 +4,16 @@ main.py → UserIntent.AGENT → handle_agent_request (Phase A: 계획 수립 �
 CARD_CLICKED ag_* → handle_agent_action (Phase B: 승인 시 background 실행)
 """
 
-from domains.agent.actions import handle_agent_action, handle_agent_request, handle_agent_revision
+from domains.agent.actions import (
+    handle_agent_action,
+    handle_agent_clarification,
+    handle_agent_request,
+    handle_agent_revision,
+)
 
-__all__ = ["handle_agent_action", "handle_agent_request", "handle_agent_revision"]
+__all__ = [
+    "handle_agent_action",
+    "handle_agent_clarification",
+    "handle_agent_request",
+    "handle_agent_revision",
+]

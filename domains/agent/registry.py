@@ -40,6 +40,80 @@ def _err(error_kind: str, detail: str = "") -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 캘린더 인증 — 개인 캘린더는 요청자 OAuth 토큰, 팀/공유 캘린더는 봇 SA 폴백.
+# (schedule_management 도메인과 동일하게 get_user_access_token 사용 → 기존 동의로 바로 동작)
+# ---------------------------------------------------------------------------
+
+_PERSONAL_CAL_HINTS = {"primary", "me", "mine", "my", "나", "내 캘린더", "내캘린더", "본인", "내것"}
+
+
+def _is_personal_calendar(calendar_id: str, user_email: str) -> bool:
+    """calendar_id 가 '요청자 본인 캘린더'를 가리키는지 — 비었거나 primary/내 캘린더/본인 이메일."""
+    cid = (calendar_id or "").strip().lower()
+    if cid in _PERSONAL_CAL_HINTS:
+        return True
+    if cid and user_email and cid == (user_email or "").strip().lower():
+        return True
+    if not cid and (user_email or "").strip():  # 캘린더 미지정 + 요청자 알면 본인으로 간주
+        return True
+    return False
+
+
+def _user_access_token(user_email: str) -> tuple[str | None, str | None]:
+    """요청자 OAuth access token. (token, error_kind). 미연결/실패 시 (None, 'auth_required')."""
+    email = (user_email or "").strip()
+    if not email:
+        return None, "auth_required"
+    from domains.schedule_management.oauth_calendar import (
+        get_user_access_token,
+        is_oauth_linked,
+    )
+
+    if not is_oauth_linked(email):
+        return None, "auth_required"
+    token = get_user_access_token(email)
+    if not token:
+        return None, "auth_required"
+    return token, None
+
+
+def _resolve_calendar_auth(calendar_id: str, kwargs: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    """(resolved_calendar_id, access_token, error_kind).
+
+    개인 캘린더 → 요청자 OAuth 토큰 + calendar_id='primary'. 팀/공유 캘린더 → SA 폴백(token None).
+    """
+    user_email = str(kwargs.get("user_email") or kwargs.get("requester_email") or "").strip()
+    if not _is_personal_calendar(calendar_id, user_email):
+        return calendar_id, None, None
+    token, err = _user_access_token(user_email)
+    if err:
+        return (calendar_id or "primary"), None, err
+    return "primary", token, None
+
+
+def _resolve_freebusy_auth(
+    calendar_ids: list[str], kwargs: dict[str, Any]
+) -> tuple[list[str], str | None, str | None]:
+    """freebusy 다중 캘린더용. 개인 캘린더가 섞이면 요청자 토큰으로 조회(개인 id→'primary')."""
+    user_email = str(kwargs.get("user_email") or kwargs.get("requester_email") or "").strip()
+    ids = [str(c).strip() for c in (calendar_ids or []) if str(c).strip()]
+    needs_personal = (not ids and bool(user_email)) or any(
+        _is_personal_calendar(c, user_email) for c in ids
+    )
+    if not needs_personal:
+        return ids, None, None
+    token, err = _user_access_token(user_email)
+    if err:
+        return ids, None, err
+    out: list[str] = []
+    for c in ids or ["primary"]:
+        mapped = "primary" if _is_personal_calendar(c, user_email) else c
+        if mapped not in out:
+            out.append(mapped)
+    return out, token, None
+
+
+# ---------------------------------------------------------------------------
 # 읽기 전용 도구 (Phase 0 / Phase C 검증용)
 # ---------------------------------------------------------------------------
 
@@ -52,7 +126,12 @@ def _run_find_free_slots(**kwargs: Any) -> dict[str, Any]:
     time_max = str(kwargs.get("time_max") or "")
     if not (time_min and time_max):
         return _err("missing_args", "time_min/time_max 필요")
-    res = freebusy_query(calendar_ids=calendar_ids, time_min=time_min, time_max=time_max)
+    calendar_ids, access_token, auth_err = _resolve_freebusy_auth(calendar_ids, kwargs)
+    if auth_err:
+        return _err(auth_err, "개인 캘린더 조회에는 '내 데이터 연결'(OAuth)이 필요해요.")
+    res = freebusy_query(
+        calendar_ids=calendar_ids, time_min=time_min, time_max=time_max, access_token=access_token
+    )
     if not res.ok:
         return _err(res.error_kind or "calendar_http_error", res.detail)
     return {"ok": True, "busy": res.busy}
@@ -61,17 +140,24 @@ def _run_find_free_slots(**kwargs: Any) -> dict[str, Any]:
 def _run_list_calendar_events(**kwargs: Any) -> dict[str, Any]:
     from domains.schedule_management.calendar_client import list_events
 
-    calendar_id = str(kwargs.get("calendar_id") or "")
     time_min = str(kwargs.get("time_min") or "")
     time_max = str(kwargs.get("time_max") or "")
-    if not (calendar_id and time_min and time_max):
-        return _err("missing_args", "calendar_id/time_min/time_max 필요")
+    if not (time_min and time_max):
+        return _err("missing_args", "time_min/time_max 필요")
+    calendar_id, access_token, auth_err = _resolve_calendar_auth(
+        str(kwargs.get("calendar_id") or ""), kwargs
+    )
+    if auth_err:
+        return _err(auth_err, "개인 캘린더 조회에는 '내 데이터 연결'(OAuth)이 필요해요.")
+    if not calendar_id:
+        return _err("calendar_id_missing", "calendar_id 필요(본인 캘린더는 user_email + calendar_id=primary)")
     res = list_events(
         calendar_id=calendar_id,
         time_min=time_min,
         time_max=time_max,
         q=str(kwargs.get("q") or ""),
         max_results=int(kwargs.get("max_results") or 30),
+        access_token=access_token,
     )
     if not res.ok:
         return _err(res.error_kind or "calendar_http_error", res.detail)
@@ -142,6 +228,104 @@ def _run_get_confluence_page_body(**kwargs: Any) -> dict[str, Any]:
     if not body:
         return _err("not_found", "본문을 읽지 못함")
     return {"ok": True, "body": body}
+
+
+def _confluence_numeric_id(url_or_id: str) -> str:
+    """Confluence URL/숫자에서 folder/page 숫자 ID 추출 (page_creator._extract_confluence_id 와 동일)."""
+    import re as _re
+
+    text = (url_or_id or "").strip()
+    if not text:
+        return ""
+    m = _re.search(r"/(?:folder|pages|content)/(\d+)", text)
+    if m:
+        return m.group(1)
+    return text if text.isdigit() else ""
+
+
+def _resolve_report_root_id(team_index: dict[str, Any]) -> str:
+    """팀 설정에서 주간보고 root 폴더 ID. 우선순위: root_pages[0] → report_root_page_id."""
+    for entry in team_index.get("root_pages") or []:
+        raw = str(entry.get("page_id") if isinstance(entry, dict) else entry).strip()
+        rid = _confluence_numeric_id(raw)
+        if rid:
+            return rid
+    return _confluence_numeric_id(str(team_index.get("report_root_page_id") or ""))
+
+
+def _run_find_team_weekly_report(**kwargs: Any) -> dict[str, Any]:
+    """팀·날짜 기준 최신 주간보고 페이지를 찾아 본문까지 읽어온다.
+
+    키워드 검색(search_confluence)과 달리 팀 폴더(YYYY년>N분기) 구조를 따라 제목 날짜가
+    가장 최신인 페이지를 고르므로 "최신/최근/PC2팀 주간보고" 의미를 정확히 살린다.
+    """
+    from api.confluence.client import ConfluenceClient
+    from api.confluence.pages import get_page_body
+    from api.confluence.previous_report import (
+        get_latest_weekly_report_page_id_for_team_root,
+    )
+    from firestore.team_config import find_team_by_email, get_team_from_index, make_team_id
+
+    team_name_in = str(kwargs.get("team_name") or "").strip()
+    requester_email = str(
+        kwargs.get("requester_email") or kwargs.get("user_email") or ""
+    ).strip()
+
+    # 1. 팀 ID — 명시 팀명 우선, 없으면 요청자 소속팀
+    team_id = ""
+    if team_name_in:
+        team_id = make_team_id(team_name_in)
+    elif requester_email:
+        team_id = find_team_by_email(requester_email) or ""
+    if not team_id:
+        return {"ok": True, "found": False, "detail": "팀을 찾지 못했어요(team_name 또는 요청자 소속팀 필요)."}
+
+    team_index = get_team_from_index(team_id) or {}
+    team_name = str(team_index.get("name") or team_name_in or team_id).strip()
+    report_root_id = _resolve_report_root_id(team_index)
+    if not report_root_id:
+        return {"ok": True, "found": False, "detail": f"{team_name}의 주간보고 폴더(report_root)가 설정되지 않았어요."}
+
+    # 2. 팀·날짜 기준 최신 주간보고 페이지 ID
+    try:
+        client = ConfluenceClient()
+        page_id = get_latest_weekly_report_page_id_for_team_root(
+            client, report_root_id, team_name
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("find_team_weekly_report 조회 실패 team=%s: %s", team_name, e)
+        return _err("http_error", str(e))
+
+    if not page_id:
+        return {"ok": True, "found": False, "detail": f"{team_name}의 최신 주간보고 페이지를 찾지 못했어요."}
+
+    page_id = str(page_id)
+    # 3. 본문(요약에 바로 쓸 수 있게) + 제목·링크
+    content = get_page_body(page_id=page_id, max_chars=int(kwargs.get("max_chars") or 4000))
+    title = ""
+    try:
+        info = client.get_page(page_id, expand="title")
+        title = str((info or {}).get("title") or "")
+    except Exception:  # noqa: BLE001
+        title = ""
+    space_key = str(team_index.get("space_key") or team_index.get("confluence_space_key") or "").strip()
+    web_link = ""
+    try:
+        base = str(getattr(client, "_base_url", "") or "").rstrip("/")
+        if base and space_key:
+            web_link = f"{base}/wiki/spaces/{space_key}/pages/{page_id}"
+    except Exception:  # noqa: BLE001
+        web_link = ""
+
+    return {
+        "ok": True,
+        "found": True,
+        "team_name": team_name,
+        "page_id": page_id,
+        "title": title,
+        "web_link": web_link,
+        "content": content,
+    }
 
 
 def _run_get_my_recent_artifacts(**kwargs: Any) -> dict[str, Any]:
@@ -302,7 +486,11 @@ def _run_create_meeting(**kwargs: Any) -> dict[str, Any]:
         extract_meet_link,
     )
 
-    calendar_id = str(kwargs.get("calendar_id") or "")
+    calendar_id, access_token, auth_err = _resolve_calendar_auth(
+        str(kwargs.get("calendar_id") or ""), kwargs
+    )
+    if auth_err:
+        return _err(auth_err, "개인 캘린더에 일정 생성하려면 '내 데이터 연결'(OAuth)이 필요해요.")
     summary = str(kwargs.get("summary") or kwargs.get("title") or "")
     start_iso, end_iso = _resolve_start_end(kwargs)
     if not (calendar_id and summary and start_iso and end_iso):
@@ -316,6 +504,7 @@ def _run_create_meeting(**kwargs: Any) -> dict[str, Any]:
         location=str(kwargs.get("location") or ""),
         description=str(kwargs.get("description") or ""),
         add_google_meet=bool(kwargs.get("add_google_meet") or kwargs.get("auto_meet")),
+        access_token=access_token,
     )
     if not res.ok:
         return _err(res.error_kind or "calendar_http_error", res.detail)
@@ -332,11 +521,15 @@ def _run_create_meeting(**kwargs: Any) -> dict[str, Any]:
 def _run_cancel_meeting(**kwargs: Any) -> dict[str, Any]:
     from domains.schedule_management.calendar_client import delete_event
 
-    calendar_id = str(kwargs.get("calendar_id") or "")
+    calendar_id, access_token, auth_err = _resolve_calendar_auth(
+        str(kwargs.get("calendar_id") or ""), kwargs
+    )
+    if auth_err:
+        return _err(auth_err, "개인 캘린더 일정 취소에는 '내 데이터 연결'(OAuth)이 필요해요.")
     event_id = str(kwargs.get("event_id") or "")
     if not (calendar_id and event_id):
         return _err("missing_args", "calendar_id/event_id 필요")
-    res = delete_event(calendar_id=calendar_id, event_id=event_id)
+    res = delete_event(calendar_id=calendar_id, event_id=event_id, access_token=access_token)
     if not res.ok:
         return _err(res.error_kind or "calendar_http_error", res.detail)
     return {"ok": True, "dry_run": is_dry_run()}
@@ -345,7 +538,11 @@ def _run_cancel_meeting(**kwargs: Any) -> dict[str, Any]:
 def _run_update_meeting(**kwargs: Any) -> dict[str, Any]:
     from domains.schedule_management.calendar_client import patch_event
 
-    calendar_id = str(kwargs.get("calendar_id") or "")
+    calendar_id, access_token, auth_err = _resolve_calendar_auth(
+        str(kwargs.get("calendar_id") or ""), kwargs
+    )
+    if auth_err:
+        return _err(auth_err, "개인 캘린더 일정 수정에는 '내 데이터 연결'(OAuth)이 필요해요.")
     event_id = str(kwargs.get("event_id") or "")
     if not (calendar_id and event_id):
         return _err("missing_args", "calendar_id/event_id 필요")
@@ -358,6 +555,7 @@ def _run_update_meeting(**kwargs: Any) -> dict[str, Any]:
         end_iso=end_iso or None,
         location=kwargs.get("location"),
         attendees=_as_list(kwargs.get("attendee_emails") or kwargs.get("attendees")) or None,
+        access_token=access_token,
     )
     if not res.ok:
         return _err(res.error_kind or "calendar_http_error", res.detail)
@@ -422,7 +620,8 @@ def register_default_tools() -> None:
             "여러 캘린더의 busy(바쁜) 구간을 조회해 빈 시간을 찾는다. "
             "회의 생성(create_meeting) 전에 반드시 먼저 호출해 가능한 시간을 확인할 것. "
             "calendar_ids(이메일/캘린더ID 배열), time_min, time_max(RFC3339)를 받고 "
-            "{busy: {calendar_id: [{start,end}]}} 를 반환한다."
+            "{busy: {calendar_id: [{start,end}]}} 를 반환한다. "
+            "요청자 '본인' 캘린더의 빈 시간이면 calendar_ids=['primary'] 와 user_email(요청자 이메일)을 넣어라."
         ),
         parameters={
             "type": "object",
@@ -430,6 +629,7 @@ def register_default_tools() -> None:
                 "calendar_ids": {"type": "array", "items": {"type": "string"}},
                 "time_min": {"type": "string", "description": "RFC3339 시작"},
                 "time_max": {"type": "string", "description": "RFC3339 끝"},
+                "user_email": {"type": "string", "description": "요청자 이메일 — 본인 캘린더 조회 시 필수"},
             },
             "required": ["calendar_ids", "time_min", "time_max"],
         },
@@ -438,16 +638,21 @@ def register_default_tools() -> None:
     register(Tool(
         name="list_calendar_events",
         description=(
-            "한 캘린더에서 기간 내 이벤트 목록을 조회한다. 기존 일정 확인·중복 점검에 쓴다. "
-            "calendar_id, time_min, time_max, (선택) q 검색어를 받는다."
+            "한 캘린더에서 기간 내 이벤트 목록을 조회한다. '내 일정/이번주 일정' 등 일정 조회·요약에 쓴다. "
+            "calendar_id, time_min, time_max, (선택) q 검색어를 받고 "
+            "{events:[{id,summary,start,end,location,attendees}]} 를 반환한다"
+            "(요약하려면 generate_content 의 source 에 {\"$ref\": \"<이단계번호>.events\"} 로 연결). "
+            "요청자 '본인' 캘린더(내 캘린더/내 일정)이면 calendar_id='primary' 와 user_email(요청자 이메일)을 넣어라. "
+            "팀·회의실 등 공유 캘린더는 그 calendar_id 를 그대로 쓴다(user_email 불필요)."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "calendar_id": {"type": "string"},
+                "calendar_id": {"type": "string", "description": "본인 캘린더는 'primary'"},
                 "time_min": {"type": "string"},
                 "time_max": {"type": "string"},
                 "q": {"type": "string"},
+                "user_email": {"type": "string", "description": "요청자 이메일 — 본인 캘린더 조회 시 필수"},
             },
             "required": ["calendar_id", "time_min", "time_max"],
         },
@@ -522,6 +727,27 @@ def register_default_tools() -> None:
         run=_run_get_confluence_page_body,
     ))
     register(Tool(
+        name="find_team_weekly_report",
+        description=(
+            "팀의 '최신/최근/지난주/이번주' 주간보고·주간회의 페이지를 정확히 찾아 본문까지 읽어온다. "
+            "팀 폴더(연도>분기) 구조에서 제목 날짜가 가장 최신인 페이지를 고르므로, "
+            "주간보고/주간회의를 조회·요약하려면 키워드 검색(search_confluence) 대신 이 도구를 우선 사용할 것. "
+            "team_name(예: 'PC2팀'. 생략하면 요청자 소속팀 자동 인식), (선택) requester_email 을 받아 "
+            "{found, page_id, title, web_link, content} 를 반환한다. 요약은 보통 content 를 generate_content 의 "
+            "source 로 바로 연결하면 된다(예: source={\"$ref\": \"1.content\"}). found=false 면 페이지가 없는 것."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "team_name": {"type": "string", "description": "예: 'PC2팀'. 없으면 요청자 소속팀"},
+                "requester_email": {"type": "string", "description": "요청자 이메일(팀 자동 인식용)"},
+                "max_chars": {"type": "integer"},
+            },
+            "required": [],
+        },
+        run=_run_find_team_weekly_report,
+    ))
+    register(Tool(
         name="get_email_body",
         description=(
             "Gmail 메시지 한 개의 본문 텍스트를 읽는다. search_emails 는 메타만 주므로, 내용을 참조·요약하려면 "
@@ -591,18 +817,20 @@ def register_default_tools() -> None:
             "Google Calendar 에 회의를 생성한다. 되돌릴 수 없으므로 반드시 사전에 find_free_slots 로 "
             "빈 시간을 확인한 뒤 호출할 것. calendar_id, summary(title), "
             "(start_iso+end_iso) 또는 (meeting_date+meeting_time+duration_minutes), "
-            "attendee_emails, add_google_meet 를 받는다."
+            "attendee_emails, add_google_meet 를 받는다. "
+            "요청자 '본인' 캘린더에 만들면 calendar_id='primary' 와 user_email(요청자 이메일)을 넣어라."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "calendar_id": {"type": "string"},
+                "calendar_id": {"type": "string", "description": "본인 캘린더는 'primary'"},
                 "summary": {"type": "string"},
                 "meeting_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "meeting_time": {"type": "string", "description": "HH:MM"},
                 "duration_minutes": {"type": "integer"},
                 "attendee_emails": {"type": "array", "items": {"type": "string"}},
                 "add_google_meet": {"type": "boolean"},
+                "user_email": {"type": "string", "description": "요청자 이메일 — 본인 캘린더에 생성 시 필수"},
             },
             "required": ["calendar_id", "summary"],
         },
@@ -611,12 +839,16 @@ def register_default_tools() -> None:
     ))
     register(Tool(
         name="cancel_meeting",
-        description="기존 회의(이벤트)를 삭제한다. calendar_id, event_id 를 받는다. 되돌릴 수 없음.",
+        description=(
+            "기존 회의(이벤트)를 삭제한다. calendar_id, event_id 를 받는다. 되돌릴 수 없음. "
+            "본인 캘린더 일정이면 calendar_id='primary' + user_email."
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "calendar_id": {"type": "string"},
+                "calendar_id": {"type": "string", "description": "본인 캘린더는 'primary'"},
                 "event_id": {"type": "string"},
+                "user_email": {"type": "string", "description": "요청자 이메일 — 본인 캘린더 일정 시 필수"},
             },
             "required": ["calendar_id", "event_id"],
         },
@@ -626,17 +858,19 @@ def register_default_tools() -> None:
     register(Tool(
         name="update_meeting",
         description=(
-            "기존 회의의 시간/제목/참석자를 수정한다. calendar_id, event_id + 변경할 필드를 받는다."
+            "기존 회의의 시간/제목/참석자를 수정한다. calendar_id, event_id + 변경할 필드를 받는다. "
+            "본인 캘린더 일정이면 calendar_id='primary' + user_email."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "calendar_id": {"type": "string"},
+                "calendar_id": {"type": "string", "description": "본인 캘린더는 'primary'"},
                 "event_id": {"type": "string"},
                 "summary": {"type": "string"},
                 "start_iso": {"type": "string"},
                 "end_iso": {"type": "string"},
                 "attendee_emails": {"type": "array", "items": {"type": "string"}},
+                "user_email": {"type": "string", "description": "요청자 이메일 — 본인 캘린더 일정 시 필수"},
             },
             "required": ["calendar_id", "event_id"],
         },

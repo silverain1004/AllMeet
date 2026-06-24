@@ -41,11 +41,17 @@ def build_planner_prompt(
   예: {{"$ref": "1.busy"}} 는 1번 단계 결과의 busy 필드.
 - 검색 도구(search_confluence/search_emails)는 제목·링크·메타만 준다. 본문 내용이 필요하면
   get_confluence_page_body / get_email_body 로 본문을 먼저 읽어라(예: page_id={{"$ref": "1.pages.0.id"}}).
+- 주간보고·주간회의 페이지를 '최신/최근/지난주/이번주' 또는 특정 팀(예: PC2팀) 기준으로 조회·요약할 때는
+  키워드 검색(search_confluence) 대신 find_team_weekly_report 를 먼저 써라(날짜·팀 기준으로 정확한 페이지를 찾는다).
+  반환된 content 를 generate_content 의 source 에 $ref 로 연결하면 본문 읽기 단계 없이 바로 요약할 수 있다.
 - 새 문서·체크리스트·로드맵·요약을 만들어야 하면 generate_content 로 생성한다.
   참조자료는 source 에 이전 단계 결과를 $ref 로 연결한다(예: source={{"$ref": "2.body"}}).
   검색→본문읽기→생성 체인이면 generate_content 에 require_source: true 를 반드시 넣어라.
   생성 결과를 문서로 남기려면 create_confluence_page 의 html_content 에
   {{"$ref": "<생성단계>.content_html"}} 로 연결한다.
+- 캘린더 도구(list_calendar_events/find_free_slots/create_meeting 등)로 '내/본인' 일정·캘린더
+  (내 일정, 이번주 일정 등)를 다룰 때는 calendar_id 에 'primary' 를, user_email 에 요청자 이메일을 넣어라
+  (개인 캘린더는 요청자 OAuth 로 접근). 팀·회의실 등 공유 캘린더만 그 캘린더 ID 를 쓴다.
 - 정보가 부족해 계획을 못 세우면 steps 를 빈 배열로 두고 ask_user 에 사용자에게 물을 한 문장을 적는다.
 - 사용자가 명시하지 않은 사람에게 메일/초대를 보내지 않는다.
 

@@ -21,6 +21,9 @@ from domains.agent.planner import create_plan, revise_plan
 
 logger = logging.getLogger(__name__)
 
+# 명료화 라운드 상한 — 무한 되묻기 루프 방지(초기 ask 포함 카운트).
+_MAX_CLARIFY_ATTEMPTS = 3
+
 
 def _user_email(chat_event: dict[str, Any] | None) -> str:
     return str(((chat_event or {}).get("user") or {}).get("email") or "").strip()
@@ -103,6 +106,14 @@ def _build_plan_response(
 
     if not plan.get("steps"):
         ask = plan.get("ask_user") or "요청을 조금 더 구체적으로 알려주시겠어요?"
+        # 되물음을 영속화 — 후속 답변을 원 요청과 병합·재계획하기 위한 '명료화 대기' 상태.
+        if user_email and space_name:
+            try:
+                store.save_clarification(
+                    user_message, ask, user_email=user_email, space_name=space_name
+                )
+            except Exception:
+                logger.exception("clarification 저장 실패")
         return cards.build_ask_user_card(ask)
 
     if not space_name:
@@ -153,6 +164,136 @@ def _run_create_plan_background(
             )
         except Exception:
             logger.warning("agent plan 실패 알림 push 실패", exc_info=True)
+
+
+def handle_agent_clarification(
+    answer: str,
+    *,
+    chat_event: dict[str, Any] | None = None,
+    existing: dict[str, Any] | None = None,
+    ctx_block: str = "",
+) -> dict[str, Any]:
+    """'명료화 대기' 중 들어온 후속 답변을 원 요청과 병합해 재계획한다."""
+    if not existing:
+        return handle_agent_request(answer, chat_event=chat_event, ctx_block=ctx_block)
+
+    space_name = _space_name(chat_event)
+    if space_name:
+        from api.chat.loading import loading_text, start_background
+
+        start_background(_run_clarify_background, answer, chat_event, existing, ctx_block)
+        return loading_text("이어서 계획을 세우는 중이에요…")
+
+    return _build_clarify_response(
+        answer,
+        existing=existing,
+        user_email=_user_email(chat_event),
+        user_name=_user_name(chat_event),
+        space_name=space_name,
+        ctx_block=ctx_block,
+    )
+
+
+def _merge_clarification(original: str, answer: str) -> str:
+    original = (original or "").strip()
+    answer = (answer or "").strip()
+    if not original:
+        return answer
+    return f"{original}\n(추가 정보: {answer})"
+
+
+def _build_clarify_response(
+    answer: str,
+    *,
+    existing: dict[str, Any],
+    user_email: str,
+    user_name: str,
+    space_name: str,
+    ctx_block: str,
+) -> dict[str, Any]:
+    from domains.agent import memory
+
+    clar_id = str(existing.get("plan_id") or "").strip()
+    attempts = int(existing.get("clarify_attempts") or 1)
+    merged = _merge_clarification(str(existing.get("goal") or ""), answer)
+
+    memory_block = memory.format_memory_block(memory.load_user_memory(user_email))
+    plan = create_plan(
+        merged,
+        user_name=user_name,
+        user_email=user_email,
+        ctx_block=ctx_block,
+        memory_block=memory_block,
+    )
+
+    # 명료화 레코드는 어느 경로로 끝나든 닫는다(steps 성공·재명료화·포기) — 누수 방지.
+    if clar_id:
+        store.clear_clarification(clar_id)
+
+    if plan.get("steps"):
+        if not space_name:
+            return {"text": _plan_preview_text(plan)}
+        try:
+            plan_id = store.save_plan(plan, user_email=user_email, space_name=space_name)
+        except Exception:
+            logger.exception("계획 저장 실패")
+            return {"text": "계획을 저장하지 못했어요. 잠시 후 다시 시도해 주세요."}
+        return cards.build_plan_approval_card(
+            plan_id=plan_id,
+            goal=plan.get("goal", ""),
+            steps=plan.get("steps", []),
+            rationale=plan.get("plan_rationale", ""),
+            critique_note=plan.get("critique_note", ""),
+        )
+
+    # 여전히 정보 부족 — 상한 내면 새 명료화 레코드로 한 번 더, 넘으면 정중히 종료.
+    ask = plan.get("ask_user") or "조금 더 구체적으로 알려주시겠어요?"
+    if attempts >= _MAX_CLARIFY_ATTEMPTS:
+        return cards.build_ask_user_card(
+            f"{ask}\n\n계속 어려우면 기능 이름(예: '주간보고초안')이나 문서명을 직접 알려주세요."
+        )
+    if user_email and space_name:
+        try:
+            store.save_clarification(
+                merged, ask, user_email=user_email, space_name=space_name, attempts=attempts + 1
+            )
+        except Exception:
+            logger.exception("clarification 갱신 실패")
+    return cards.build_ask_user_card(ask)
+
+
+def _run_clarify_background(
+    answer: str,
+    chat_event: dict[str, Any] | None,
+    existing: dict[str, Any],
+    ctx_block: str,
+) -> None:
+    space_name = _space_name(chat_event)
+    if not space_name:
+        return
+    try:
+        out = _build_clarify_response(
+            answer,
+            existing=existing,
+            user_email=_user_email(chat_event),
+            user_name=_user_name(chat_event),
+            space_name=space_name,
+            ctx_block=ctx_block,
+        )
+        from api.chat.messages import post_message_to_space
+
+        post_message_to_space(space_name=space_name, payload=out)
+    except Exception:
+        logger.exception("agent clarify background 실패")
+        try:
+            from api.chat.messages import post_message_to_space
+
+            post_message_to_space(
+                space_name=space_name,
+                payload={"text": "계획을 세우지 못했어요. 잠시 후 다시 시도해 주세요."},
+            )
+        except Exception:
+            logger.warning("clarify 실패 알림 push 실패", exc_info=True)
 
 
 def handle_agent_revision(

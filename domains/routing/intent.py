@@ -151,9 +151,8 @@ def _classify_label(
     ctx = (ctx_block or "").strip()
     extra = (extra_block or "").strip()
     try:
-        from vertexai.generative_models import GenerationConfig
-
-        from domains.daily_chat.chat import _get_generative_model
+        from config.settings import ALLMEET_INTENT_MODEL
+        from domains.agent._llm import generate_text
 
         body = (
             "역할: 분류기. 출력은 지정된 라벨 한 단어만.\n\n"
@@ -163,20 +162,24 @@ def _classify_label(
             body += f"{extra}\n\n"
         body += f"{ctx}\n\n" if ctx else "(이전 대화 없음)\n\n"
         body += f'사용자 마지막 발화: "{msg}"\n\n분류:'
-        res = _get_generative_model().generate_content(
-            body,
-            generation_config=GenerationConfig(temperature=0, max_output_tokens=16),
-        )
-        raw = (res.text or "").strip().lower()
+        # 폴백 분류기는 pro(2.5)로 — fast-path 가 놓친 애매한 발화만 도달한다.
+        # 2.5 계열은 thinking 모델이라 토큰이 적으면 thinking 에 소진돼 본문이 빌 수 있으므로,
+        # 한 단어 답이라도 넉넉한 budget 을 준다(빈 응답이면 daily_chat 폴백).
+        raw = (
+            generate_text(
+                body, model=ALLMEET_INTENT_MODEL, max_output_tokens=1024, temperature=0
+            )
+            or ""
+        ).strip().lower()
         if not raw:
             return "daily_chat"
         first = raw.split()[0].rstrip(".,!?")
         if first in valid:
             return first
-        # 부분 매칭 (daily chat 등)
-        for label in valid:
-            if label in raw:
-                return label
+        # 부분 매칭 — 정확 라벨 우선, 동률이면 가장 긴 라벨(frozenset 비결정 순서 보정).
+        hits = [label for label in valid if label in raw]
+        if hits:
+            return max(hits, key=len)
     except Exception as e:
         logger.warning(log_fail, e)
     return "daily_chat"
@@ -220,6 +223,48 @@ def is_plan_revision(
     return _yes_no_revision(msg, ctx_block, active_plan=active_plan)
 
 
+def _deterministic_label(msg: str, ctx_block: str) -> tuple[str, str] | None:
+    """LLM 이전 결정적 라우팅 — (label, route_path) 또는 None(애매 → LLM 폴백).
+
+    agent(조회→생성 연쇄)를 도메인 fast-path 보다 먼저 둬, "주간회의 페이지 찾아서 요약"=agent
+    가 보장되고 "주간회의 팀 등록"=weekly_meeting 으로 갈린다.
+    """
+    from domains.routing.patterns import (
+        is_exact_home_greeting,
+        looks_like_agent_task,
+        looks_like_expert_finder,
+        looks_like_home_greeting,
+        looks_like_schedule_booking,
+        looks_like_weekly_meeting_setup,
+    )
+
+    fast = _explicit_intent_fastpath(msg)
+    if fast:
+        return fast, "explicit_fastpath"
+    if is_exact_home_greeting(msg):
+        return "home_menu", "exact_home_greeting"
+    if not (ctx_block or "").strip() and looks_like_home_greeting(msg):
+        return "home_menu", "home_greeting"
+    if looks_like_agent_task(msg):
+        return "agent", "agent_pattern"
+    if looks_like_expert_finder(msg):
+        return "expert_finder", "expert_fastpath"
+    if looks_like_schedule_booking(msg):
+        return "schedule_management", "schedule_fastpath"
+    if looks_like_weekly_meeting_setup(msg):
+        return "weekly_meeting", "weekly_meeting_fastpath"
+    return None
+
+
+def deterministic_intent(user_message: str, ctx_block: str = "") -> str | None:
+    """결정적 fast-path 로 확정되는 intent 라벨(없으면 None). 명료화 하이재킹 가드용."""
+    msg = (user_message or "").strip()
+    if not msg:
+        return None
+    decided = _deterministic_label(msg, ctx_block)
+    return decided[0] if decided else None
+
+
 def classify_intent(
     user_message: str,
     ctx_block: str = "",
@@ -227,12 +272,6 @@ def classify_intent(
     active_plan: dict[str, Any] | None = None,
 ) -> str:
     """사용자 발화 → intent 라벨 문자열. 실패 시 daily_chat."""
-    from domains.routing.patterns import (
-        is_exact_home_greeting,
-        looks_like_agent_task,
-        looks_like_home_greeting,
-    )
-
     msg = (user_message or "").strip()
     if not msg:
         return "daily_chat"
@@ -242,19 +281,9 @@ def classify_intent(
         logger.info("route intent=%s path=%s msg=%r", label, route_path, msg[:80])
         return label
 
-    fast = _explicit_intent_fastpath(msg)
-    if fast:
-        return _decided(fast, "explicit_fastpath")
-
-    if is_exact_home_greeting(msg):
-        return _decided("home_menu", "exact_home_greeting")
-
-    ctx = (ctx_block or "").strip()
-    if not ctx and looks_like_home_greeting(msg):
-        return _decided("home_menu", "home_greeting")
-
-    if looks_like_agent_task(msg):
-        return _decided("agent", "agent_pattern")
+    decided = _deterministic_label(msg, ctx_block)
+    if decided is not None:
+        return _decided(*decided)
 
     extra = _active_plan_block(active_plan)
     label = _classify_label(
@@ -265,7 +294,4 @@ def classify_intent(
         log_fail="classify_intent 실패, daily_chat 폴백: %s",
         extra_block=extra,
     )
-
-    if label == "daily_chat" and looks_like_agent_task(msg):
-        return _decided("agent", "llm+agent_pattern_override")
     return _decided(label, "llm")

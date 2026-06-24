@@ -25,11 +25,16 @@ from domains.daily_chat import (
     reply_daily_chat,
     reply_with_home_menu,
 )
-from domains.agent import handle_agent_action, handle_agent_request, handle_agent_revision
+from domains.agent import (
+    handle_agent_action,
+    handle_agent_clarification,
+    handle_agent_request,
+    handle_agent_revision,
+)
 from domains.agent import store as agent_store
-from domains.agent.landing import wrap_with_agent_cta
+from domains.agent.landing import wrap_daily_chat_with_recovery, wrap_with_agent_cta
 from domains.routing.context import load_ctx_block
-from domains.routing.intent import classify_intent, is_plan_revision
+from domains.routing.intent import classify_intent, deterministic_intent, is_plan_revision
 from domains.expert_finder import handle_expert_finder
 from domains.schedule_management import (
     handle_schedule_management,
@@ -98,12 +103,45 @@ def match_user_intent(
     *,
     active_plan: dict[str, Any] | None = None,
 ) -> UserIntent:
-    """LLM + 맥락 기반 intent 분류. 명시적 fast-path(설정·주간보고초안)만 키워드."""
+    """결정적 fast-path(설정·주간보고초안·agent·전문가·일정·주간회의) → 애매하면 pro LLM 분류."""
     label = classify_intent(user_message, ctx_block, active_plan=active_plan)
     try:
         return UserIntent(label)
     except ValueError:
         return UserIntent.DAILY_CHAT
+
+
+def _clarification_expired(created_at_iso: str, *, minutes: int = 15) -> bool:
+    """명료화 레코드가 만료됐는지(생성 후 N분 초과). 파싱 실패 시 만료 아님으로 본다."""
+    if not (created_at_iso or "").strip():
+        return False
+    try:
+        from datetime import datetime, timezone
+
+        created = datetime.fromisoformat(created_at_iso)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+        return age > minutes * 60
+    except Exception:
+        return False
+
+
+def _should_consume_clarification(
+    user_message: str,
+    clarification: dict[str, Any],
+    ctx_block: str,
+) -> bool:
+    """후속 발화를 명료화 답변으로 소비할지 판정.
+
+    만료됐거나, 새 발화가 독립적으로 결정적 라우팅(설정·agent·도메인 fast-path)을 트리거하면
+    답변이 아니라 '새 작업'으로 보고 소비하지 않는다(하이재킹·누수 방지).
+    """
+    if _clarification_expired(str(clarification.get("created_at") or "")):
+        return False
+    if deterministic_intent(user_message, ctx_block) is not None:
+        return False
+    return True
 
 
 def _extract_user_message(payload: dict[str, Any]) -> str | None:
@@ -153,7 +191,9 @@ def _dispatch_by_intent(
             )
         case UserIntent.DAILY_CHAT:
             # 일상 대화: Vertex Gemini + Firestore 맥락 (domains.daily_chat.reply_daily_chat)
-            return reply_daily_chat(user_message, chat_event=payload)
+            # action-like 발화면 'AI에게 맡기기' 회수 CTA 부착(라우팅 false-negative 안전망).
+            reply = reply_daily_chat(user_message, chat_event=payload)
+            return wrap_daily_chat_with_recovery(reply, user_message=user_message)
         case UserIntent.HOME_MENU:
             return reply_with_home_menu(user_message, chat_event=payload)
         case UserIntent.EXPERT_FINDER:
@@ -511,6 +551,11 @@ def hello_http(request):
         if user_email and space_name
         else None
     )
+    pending_clarification = (
+        agent_store.find_pending_clarification(user_email, space_name)
+        if user_email and space_name and not active_plan
+        else None
+    )
     if active_plan and is_plan_revision(user_message, active_plan, ctx_block):
         reply = handle_agent_revision(
             user_message,
@@ -518,7 +563,20 @@ def hello_http(request):
             existing_plan=active_plan,
             ctx_block=ctx_block,
         )
+    elif pending_clarification and _should_consume_clarification(
+        user_message, pending_clarification, ctx_block
+    ):
+        # 플래너 되물음에 대한 후속 답변 — 원 요청과 병합해 재계획.
+        reply = handle_agent_clarification(
+            user_message,
+            chat_event=payload,
+            existing=pending_clarification,
+            ctx_block=ctx_block,
+        )
     else:
+        if pending_clarification:
+            # 새 발화가 답변이 아니라 새 작업/만료 → 명료화 레코드 정리(누수 방지).
+            agent_store.clear_clarification(str(pending_clarification.get("plan_id") or ""))
         intent = match_user_intent(user_message, ctx_block, active_plan=active_plan)
         logger.info("intent=%s message=%s", intent.value, user_message[:200])
         reply = _dispatch_by_intent(

@@ -26,6 +26,9 @@ STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_REJECTED = "rejected"
 STATUS_PENDING_REAPPROVAL = "pending_reapproval"
+# 플래너가 되물어 답변을 기다리는 상태 — 후속 답변을 원 요청과 병합·재계획하기 위한 최소 상태.
+STATUS_CLARIFYING = "clarifying"
+STATUS_CLARIFY_CLOSED = "clarify_closed"
 
 
 def _ref(plan_id: str):
@@ -203,3 +206,55 @@ def find_active_plan(
     except Exception:
         logger.exception("find_active_plan 실패 user=%s space=%s", user_email, space_name)
         return None
+
+
+def save_clarification(
+    user_message: str,
+    ask: str,
+    *,
+    user_email: str,
+    space_name: str,
+    attempts: int = 1,
+) -> str:
+    """플래너가 되물을 때 '명료화 대기' 레코드를 저장하고 plan_id 반환.
+
+    후속 답변을 원 요청(goal)과 병합·재계획하기 위한 최소 상태. agent_plans 컬렉션을 공유하되
+    status=clarifying 으로 승인 대기 plan 과 분리된다.
+    """
+    from datetime import datetime, timezone
+
+    from firestore.documents import ensure_document
+
+    plan_id = uuid.uuid4().hex
+    create_data = {
+        "plan_id": plan_id,
+        "goal": str(user_message or ""),
+        "ask": str(ask or ""),
+        "clarify_attempts": int(attempts),
+        "steps_json": "[]",
+        "results_json": "{}",
+        "trace_json": "[]",
+        "status": STATUS_CLARIFYING,
+        "user_email": user_email,
+        "space_name": space_name,
+        "error": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        ensure_document(_ref(plan_id), create_data=create_data, update_on_exists=create_data)
+    except Exception:
+        logger.exception("save_clarification 실패")
+        raise
+    return plan_id
+
+
+def find_pending_clarification(user_email: str, space_name: str) -> dict[str, Any] | None:
+    """user+space 의 가장 최근 '명료화 대기' 레코드. 없으면 None."""
+    return find_active_plan(user_email, space_name, statuses=(STATUS_CLARIFYING,))
+
+
+def clear_clarification(plan_id: str) -> None:
+    """명료화 레코드를 닫는다(소비·만료·하이재킹 시) — 이후 find 에서 제외."""
+    if not (plan_id or "").strip():
+        return
+    set_status(plan_id, STATUS_CLARIFY_CLOSED)

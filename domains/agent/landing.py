@@ -67,3 +67,33 @@ def wrap_with_agent_cta(
     if hint:
         out["text"] = f"{existing}\n\n{hint}".strip() if existing else hint
     return out
+
+
+def wrap_daily_chat_with_recovery(base_reply: Any, *, user_message: str) -> Any:
+    """daily_chat 으로 떨어졌으나 사내 업무성 발화면 'AI에게 맡기기' 회수 CTA 를 덧붙인다.
+
+    라우팅 false-negative 의 안전망 — daily_chat 이 "못 해요"로 막다른 길을 내는 대신
+    1탭으로 agent 위임(ag_delegate)할 수 있게 한다. action-like 가 아니면 원본 그대로 통과.
+    base_reply 가 문자열(일반 daily_chat 응답)이면 {text, cardsV2} dict 로 승격한다.
+    """
+    from domains.routing.patterns import looks_actionable_for_recovery
+
+    if not looks_actionable_for_recovery(user_message):
+        return base_reply
+
+    cta = build_agent_cta_card(
+        user_message=user_message,
+        intent_value="agent",
+        outline=["요청 파악", "필요한 사내 데이터 조회", "결과 정리·실행"],
+        label="🤖 AI에게 맡기기",
+    )
+    hint = "원하시면 AI가 사내 데이터를 확인해 이어서 처리할 수 있어요."
+    if isinstance(base_reply, dict):
+        out = dict(base_reply)
+        cards = out.get("cardsV2")
+        out["cardsV2"] = (list(cards) + [cta]) if isinstance(cards, list) else [cta]
+        existing = str(out.get("text") or "").strip()
+        out["text"] = f"{existing}\n\n{hint}".strip() if existing else hint
+        return out
+    text = str(base_reply or "").strip()
+    return {"text": f"{text}\n\n{hint}".strip() if text else hint, "cardsV2": [cta]}

@@ -11,8 +11,10 @@ ROUTING_MATRIX = [
     ("Kafka 전문가 추천해줘", "expert_finder"),
     ("Kafka 아키텍처를 전문가처럼 쉽게 설명해줘", "daily_chat"),
     ("내일 회의실 예약해줘", "schedule_management"),
+    ("내일 3시 회의실 예약해줘", "schedule_management"),
     ("지난주 회의록 문서 찾아서 요약해줘", "agent"),
     ("주간회의 팀 등록", "weekly_meeting"),
+    ("팀 등록", "weekly_meeting"),
     ("주간회의 페이지 핵심 요약해줘", "agent"),
     ("점심 메뉴 추천해줘", "daily_chat"),
     ("E-BIZ 찾고 배포 체크리스트 만들어줘", "agent"),
@@ -24,12 +26,14 @@ ROUTING_MATRIX = [
 
 @pytest.mark.parametrize("message,expected", ROUTING_MATRIX)
 def test_classify_intent_routing_matrix(message, expected):
-    from domains.routing.intent import classify_intent
-    from domains.routing.patterns import looks_like_agent_task
+    from domains.routing.intent import classify_intent, deterministic_intent
 
     with patch("domains.routing.intent._classify_label", return_value=expected) as mock_cls:
         assert classify_intent(message, "") == expected
-    if expected == "agent" and looks_like_agent_task(message):
+    det = deterministic_intent(message)
+    if det is not None:
+        # 결정적 fast-path 로 확정 — LLM 미호출, fast-path 라벨이 곧 정답이어야 한다.
+        assert det == expected
         mock_cls.assert_not_called()
     else:
         mock_cls.assert_called_once()
@@ -266,3 +270,82 @@ def test_load_ctx_block_from_message():
     ):
         block = load_ctx_block(chat_event)
     assert "안녕" in block
+
+
+# --- 도메인 결정적 fast-path — 실사용 실패 케이스의 운영 회귀 방지 (LLM mock 없이) ---
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("Kafka 전문가 추천해줘", "expert_finder"),
+        ("이 분야 담당자 찾아줘", "expert_finder"),
+        ("내일 3시 회의실 예약해줘", "schedule_management"),
+        ("빈 시간 찾아서 잡아줘", "schedule_management"),
+        ("주간회의 팀 등록", "weekly_meeting"),
+        ("팀 등록", "weekly_meeting"),
+        ("주간업무 설정", "weekly_meeting"),
+    ],
+)
+def test_domain_fastpath_routes_without_llm(message, expected):
+    """실사용 실패 발화가 LLM(flash) 흔들림과 무관하게 도메인으로 라우팅되는지."""
+    from domains.routing.intent import classify_intent
+
+    with patch("domains.routing.intent._classify_label") as mock_cls:
+        assert classify_intent(message, "") == expected
+    mock_cls.assert_not_called()
+
+
+def test_fastpath_negative_guards():
+    from domains.routing.patterns import (
+        looks_like_expert_finder,
+        looks_like_schedule_booking,
+        looks_like_weekly_meeting_setup,
+    )
+
+    # "전문가처럼 설명" 류는 expert_finder fast-path 아님 (daily_chat 의도)
+    assert not looks_like_expert_finder("Kafka 아키텍처를 전문가처럼 쉽게 설명해줘")
+    assert not looks_like_expert_finder("전문 용어 뜻 알려줘")
+    # 문서 검색·일정표 요약은 회의실 예약 fast-path 아님
+    assert not looks_like_schedule_booking("예약 기록 문서 찾아줘")
+    assert not looks_like_schedule_booking("회의 일정표 요약해줘")
+    # 주간보고는 weekly_meeting 설정 fast-path 아님 (agent/draft 영역)
+    assert not looks_like_weekly_meeting_setup("최신 주간보고 페이지 찾아서 요약해줘")
+    assert not looks_like_weekly_meeting_setup("주간보고 페이지 요약")
+    # 긍정 케이스 sanity
+    assert looks_like_expert_finder("Kafka 전문가 추천해줘")
+    assert looks_like_schedule_booking("내일 3시 회의실 예약해줘")
+    assert looks_like_weekly_meeting_setup("팀 등록")
+
+
+def test_deterministic_intent_helper():
+    from domains.routing.intent import deterministic_intent
+
+    assert deterministic_intent("Kafka 전문가 추천해줘") == "expert_finder"
+    assert deterministic_intent("내일 3시 회의실 예약해줘") == "schedule_management"
+    assert deterministic_intent("팀 등록") == "weekly_meeting"
+    assert deterministic_intent("최신 주간보고 페이지 찾아서 요약해줘") == "agent"
+    assert deterministic_intent("설정") == "settings"
+    assert deterministic_intent("안녕") == "home_menu"
+    # 애매한 발화는 None → LLM(pro) 폴백
+    assert deterministic_intent("E-BIZ 시스템 관련") is None
+    assert deterministic_intent("점심 메뉴 추천해줘") is None
+    assert deterministic_intent("회의 일정표 요약해줘") is None
+
+
+def test_recovery_cta_wraps_actionable_daily_chat():
+    from domains.agent.landing import wrap_daily_chat_with_recovery
+
+    out = wrap_daily_chat_with_recovery(
+        "죄송하지만 예약은 직접 할 수 없어요.", user_message="회의 일정 요약해줘"
+    )
+    assert isinstance(out, dict)
+    cards = out.get("cardsV2") or []
+    assert any(c.get("cardId") == "ag_cta" for c in cards)
+
+
+def test_recovery_cta_skips_casual_chat():
+    from domains.agent.landing import wrap_daily_chat_with_recovery
+
+    base = "안녕하세요! 무엇을 도와드릴까요?"
+    assert wrap_daily_chat_with_recovery(base, user_message="오늘 기분 어때?") == base

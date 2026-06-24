@@ -13,6 +13,28 @@ _SUMMARIZE_ASK_RE = re.compile(
     r"(요약해|요약해줘|요약해\s*주|요약만|요약\s*$|정리해|정리해줘|핵심|개요|브리핑)"
 )
 
+# --- 도메인 결정적 fast-path (고정밀·보수적) — 명백한 트리거만 LLM 없이 통과 ---
+# expert_finder: 사내 전문가/담당자 검색. "전문가처럼 설명" 류는 부정가드로 제외.
+_EXPERT_SUBJECT_RE = re.compile(r"(전문가|담당자|잘\s*아는\s*사람)")
+_EXPERT_INTENT_RE = re.compile(r"(추천|찾아|찾는|누구|누가|소개)")
+_EXPERT_NEGATIVE_RE = re.compile(r"(처럼|같이|쉽게|설명|뜻|개념|방법|정의)")
+# schedule_management: 회의실 예약/빈 시간 찾기. "예약 기록 문서"·"일정표 요약"은 미매치.
+_ROOM_RE = re.compile(r"(회의실|미팅룸|세미나실|컨퍼런스룸)")
+_BOOK_VERB_RE = re.compile(r"(예약|잡아|잡아줘|잡아\s*주|예약해)")
+_FREE_SLOT_RE = re.compile(r"빈\s*시간")
+# weekly_meeting: 팀/인원 등록·주간업무 설정. 주간보고(초안/agent)는 부정가드.
+_WM_SETUP_RE = re.compile(r"(팀\s*등록|인원\s*등록|멤버\s*등록|주간\s*업무\s*설정)")
+_WEEKLY_MEETING_RE = re.compile(r"주간\s*회의")
+_WM_ACTION_RE = re.compile(r"(등록|설정|세팅)")
+
+# daily_chat 회수 CTA 판별 — action-like 사내 업무 신호(decoration 전용, 약간 liberal).
+_RECOVERY_NOUN_RE = re.compile(
+    r"(회의실|회의|일정|미팅|예약|전문가|담당자|팀\s*등록|인원\s*등록|주간\s*회의|주간\s*보고|캘린더|스케줄)"
+)
+_RECOVERY_VERB_RE = re.compile(
+    r"(예약|잡아|등록|추천|찾아|찾는|요약|정리|알려|만들|초안|보여)"
+)
+
 _HOME_EXACT = frozenset(
     {
         "안녕",
@@ -88,3 +110,47 @@ def looks_like_home_greeting(msg: str) -> bool:
         return True
     stripped = (msg or "").strip()
     return any(k in stripped for k in _HOME_KEYWORDS)
+
+
+def looks_like_expert_finder(msg: str) -> bool:
+    """'전문가/담당자 추천·찾아줘' — 단, '전문가처럼 설명' 류는 제외(daily_chat)."""
+    text = (msg or "").strip()
+    if not text:
+        return False
+    if _EXPERT_NEGATIVE_RE.search(text):
+        return False
+    return bool(_EXPERT_SUBJECT_RE.search(text) and _EXPERT_INTENT_RE.search(text))
+
+
+def looks_like_schedule_booking(msg: str) -> bool:
+    """'회의실 예약' 또는 '빈 시간 찾아 잡기'. 문서·일정표 요약 류는 미매치."""
+    text = (msg or "").strip()
+    if not text:
+        return False
+    if _ROOM_RE.search(text) and _BOOK_VERB_RE.search(text):
+        return True
+    if _FREE_SLOT_RE.search(text) and re.search(r"(찾아|잡|예약)", text):
+        return True
+    return False
+
+
+def looks_like_weekly_meeting_setup(msg: str) -> bool:
+    """'팀/인원 등록·주간업무 설정' 또는 '주간회의 + 등록/설정'. 주간보고는 제외."""
+    text = (msg or "").strip()
+    if not text:
+        return False
+    if "주간보고" in text.replace(" ", ""):
+        return False
+    if _WM_SETUP_RE.search(text):
+        return True
+    if _WEEKLY_MEETING_RE.search(text) and _WM_ACTION_RE.search(text):
+        return True
+    return False
+
+
+def looks_actionable_for_recovery(msg: str) -> bool:
+    """daily_chat 으로 떨어졌으나 사내 업무성 발화면 True — 회수 CTA 부착용."""
+    text = (msg or "").strip()
+    if not text:
+        return False
+    return bool(_RECOVERY_NOUN_RE.search(text) and _RECOVERY_VERB_RE.search(text))

@@ -18,9 +18,14 @@ ALLMEET_CHAT_MODEL = os.environ.get("ALLMEET_CHAT_MODEL") or "gemini-2.5-flash"
 ALLMEET_DRAFT_MODEL = os.environ.get("ALLMEET_DRAFT_MODEL") or "gemini-2.5-flash"
 
 # 에이전트 플래너 전용 모델 — 멀티스텝 계획 설계/자가검수/복구는 추론 품질이 천장이라
-# 실행·분류용 flash 보다 강한 모델을 쓴다(비용·지연은 계획 단계에만 한정). 콘텐츠 생성·intent
-# 분류는 ALLMEET_CHAT_MODEL(flash) 유지.
+# 실행·분류용 flash 보다 강한 모델을 쓴다(비용·지연은 계획 단계에만 한정). 콘텐츠 생성은
+# ALLMEET_CHAT_MODEL(flash) 유지.
 ALLMEET_PLANNER_MODEL = os.environ.get("ALLMEET_PLANNER_MODEL") or "gemini-2.5-pro"
+
+# intent 분류 폴백 모델 — 결정적 fast-path 가 놓친 애매한 발화만 이 모델로 분류한다.
+# fast-path 가 명백한 케이스를 흡수하므로 pro 호출은 드물게만 발생(핫패스 지연 영향 한정).
+# 지연·비용 부담 시 ALLMEET_INTENT_MODEL=gemini-2.5-flash 로 즉시 회귀 가능.
+ALLMEET_INTENT_MODEL = os.environ.get("ALLMEET_INTENT_MODEL") or ALLMEET_PLANNER_MODEL
 
 # Drive — 센터 Shared Drive ID (drive.google.com 의 공유 드라이브 URL 끝의 문자열).
 # Phase 1 prerequisite: SA 가 이 Shared Drive 에 멤버로 등록되어 있어야 함.
