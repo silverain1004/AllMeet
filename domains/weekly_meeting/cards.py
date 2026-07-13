@@ -305,7 +305,7 @@ def build_schedule_calendar_id_card(
         {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
         {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_schedule_load_calendar_id"}}}]}},
         {"textInput": {"name": "calendar_id", "label": "주간회의 Calendar ID", "value": current_calendar_id}},
-        {"textInput": {"name": "vacation_calendar_id", "label": "휴가 Calendar ID (일정 공유 표용, 비우면 위 ID 사용)", "value": current_vacation_calendar_id}},
+        {"textInput": {"name": "vacation_calendar_id", "label": "휴가 Calendar ID (일정 공유 표용, 비우면 기본 휴가 캘린더 사용)", "value": current_vacation_calendar_id}},
         {"buttonList": {"buttons": [{"text": "저장", "onClick": {"action": {"function": "wm_schedule_save_calendar_id"}}}]}},
         {"buttonList": {"buttons": [{"text": "일정 조회로 돌아가기", "onClick": {"action": {"function": "wm_open_schedule_menu"}}}]}},
     ]

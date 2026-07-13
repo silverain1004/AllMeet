@@ -313,7 +313,10 @@ def parse_weekly_report_sections(html: str) -> Dict[str, Any]:
                 "this_week_html": cells[1].strip(),
                 "next_week_html": cells[2].strip(),
             })
-        break
+        # 첫 매칭에서 멈추지 않고 계속 수집 — 팀원이 본문에 '작성 예시' 표
+        # (예: 홍길동)를 추가해 두면 진짜 담당자 표가 그 뒤에 오기 때문.
+        # 같은 이름이 여러 표에 있으면 뒤쪽(실제 표) 데이터가 우선한다.
+        table_start = html.find("<table", table_end)
 
     return out
 

@@ -161,9 +161,32 @@ def _parse_vacation_event(summary: str) -> Optional[tuple[str, list[str], str]]:
     if cat is None and (kind.startswith("오전 ") or kind.startswith("오후 ")):
         cat = _VACATION_CATEGORY_MAP.get(kind[3:].strip())
     if cat is None:
+        # 폴백: 지역 접두/접미가 붙은 종류(예: '합정출장', '군산 출장')를
+        # 키워드 부분일치로 분류. 표시용 kind 는 원문 그대로 유지.
+        cat = _categorize_kind_by_keyword(kind)
+    if cat is None:
         return None
     names = [n.strip() for n in names_str.split(",") if n.strip()]
     return (cat, names, kind)
+
+
+# 부분일치 폴백 키워드 → 카테고리 (우선순위 순).
+# 출산휴가·특별휴가 등은 위 _VACATION_CATEGORY_MAP 정확일치에서 이미 처리되므로
+# 여기 '휴가' 폴백까지 내려오지 않는다.
+_KEYWORD_CATEGORY_ORDER: tuple[tuple[str, str], ...] = (
+    ("출장", "business_trip"),
+    ("외근", "field_work"),
+    ("재택", "remote"),
+    ("휴가", "vacation"),
+)
+
+
+def _categorize_kind_by_keyword(kind: str) -> Optional[str]:
+    """종류 문자열에 카테고리 키워드가 포함되면 해당 카테고리 반환."""
+    for label, key in _KEYWORD_CATEGORY_ORDER:
+        if label in kind:
+            return key
+    return None
 
 
 def _build_team_lookup(
@@ -526,9 +549,10 @@ def _create_by_copy(team_id: str, cfg: dict) -> str:
     full_html = update_week_range_in_assignee_table(full_html, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
 
     # 일정 공유 표 — 캘린더에서 최신 일정 데이터로 교체 (출장/외근/재택/휴가)
-    # vacation_calendar_id 우선, 없으면 settings.VACATION_CALENDAR_ID 사용
+    # calendar_id(회의 캘린더)로 폴백하면 안 됨: 휴가 이벤트가 없어 표가 비게 된다.
     vacation_cal_id = str(cfg.get("vacation_calendar_id") or VACATION_CALENDAR_ID or "")
     member_names = _get_member_names(cfg)
+    vacation_map: dict[str, dict[str, str]] = {}
     if vacation_cal_id and member_names:
         logger.info("[%s] 휴가 캘린더: %s", team_id, vacation_cal_id)
         try:
@@ -549,7 +573,19 @@ def _create_by_copy(team_id: str, cfg: dict) -> str:
     title = f"{reference_date.strftime('%Y-%m-%d')} {team_name} 주간회의"
     existing_id = _find_page_in_folder(client, quarter_id, title)
     if existing_id:
-        return f"이미 존재 — 스킵 (page_id={existing_id}, title={title})"
+        # 기존 페이지가 있으면 본문(사용자 작성 내용)은 보존하고 일정 공유 표만 패치.
+        # from_template 경로와 동일 — 스케줄러 재실행 시 최신 휴가 데이터가 반영되게 함.
+        try:
+            existing_page = client.get_page(existing_id, expand="body.storage")
+            existing_html = ((existing_page.get("body") or {}).get("storage") or {}).get("value") or ""
+        except Exception as e:
+            logger.warning("[%s] 기존 페이지 본문 조회 실패: %s", team_id, e)
+            existing_html = ""
+        if not existing_html or not vacation_map:
+            return f"이미 존재 — 스킵 (page_id={existing_id}, title={title})"
+        patched = fill_schedule_table_vacations(existing_html, vacation_map)
+        client.update_page(existing_id, title=title, html_content=patched)
+        return f"기존 페이지 패치 완료(본문 보존, 일정 공유 갱신): {title} (page_id={existing_id})"
 
     space_key = _get_space_key(cfg)
     if not space_key:
@@ -665,6 +701,7 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
 
     # 일정 공유 표 데이터 (출장/외근/재택/휴가) — 신규 생성·기존 패치 양쪽에서 재사용
     # {{SCHEDULE}} → "일정 공유" 교체 후라야 테이블을 찾을 수 있음
+    # calendar_id(회의 캘린더)로 폴백하면 안 됨: 휴가 이벤트가 없어 표가 비게 된다.
     vacation_cal_id = str(cfg.get("vacation_calendar_id") or VACATION_CALENDAR_ID or "")
     vacation_map: dict[str, dict[str, str]] = {}
     if vacation_cal_id and member_names:
