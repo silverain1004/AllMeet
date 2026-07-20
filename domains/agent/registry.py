@@ -4,6 +4,18 @@
 ``{"ok", "error_kind", "detail", ...}`` 로 정규화하는 얇은 래퍼만 둔다.
 
 import 시점에 ``register_default_tools()`` 가 자동 호출되어 도구가 등록된다.
+
+─────────────────────────────────────────────────────────────────────────────
+[새 도구 추가 가이드]  ← 이 5단계만 하면 플래너가 코드 수정 없이 자동 활용한다.
+  1. api/·domains 의 기존 함수를 `_run_xxx(**kwargs)` 로 감싼다.
+     성공: {"ok": True, ...}  (검색·목록류는 found/count 도 넣어 0건 처리·요약 체인에 도움).
+     실패: `_err(error_kind, detail)`  (auth_required → 사용자에게 '내 데이터 연결' 안내됨).
+  2. register_default_tools() 안에서 register(Tool(name, description, parameters, run, side_effect, examples)).
+  3. description 이 핵심 — 플래너는 이것만 읽는다: '언제 쓰는지 + 인자 + 반환 키(요약은
+     generate_content 의 source 에 {"$ref": "<단계>.<반환키>"} 로 연결)'. 되돌릴 수 없으면 side_effect=True.
+  4. examples=[{"when": "대표 요청", "args": {...}}] 1~2개 — 플래너 few-shot + 검색 회수에 기여.
+  5. tests/ 에 원본 함수를 mock 한 단위테스트 추가.
+─────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
@@ -355,6 +367,235 @@ def _run_get_email_body(**kwargs: Any) -> dict[str, Any]:
     return {"ok": True, "body": body}
 
 
+def _run_list_meeting_rooms(**kwargs: Any) -> dict[str, Any]:
+    from domains.schedule_management.rooms_store import get_rooms
+
+    rooms = get_rooms() or []
+    out = [
+        {
+            "name": str(r.get("display_name") or r.get("name") or "").strip(),
+            "capacity": r.get("capacity"),
+            "equipment": r.get("equipment") or [],
+            "location": str(r.get("location") or "").strip(),
+            # 예약용 calendar_id (create_meeting/find_free_slots 의 calendar_id 로 사용)
+            "calendar_id": str(r.get("calendar_resource_id") or "").strip(),
+        }
+        for r in rooms
+        if isinstance(r, dict)
+    ]
+    return {"ok": True, "rooms": out, "count": len(out), "found": len(out) > 0}
+
+
+def _run_search_drive_files(**kwargs: Any) -> dict[str, Any]:
+    from api.drive.files import list_files_by_query
+
+    query = str(kwargs.get("query") or "")
+    if not query.strip():
+        return _err("empty_query", "query 필요")
+    user_email = str(kwargs.get("user_email") or kwargs.get("requester_email") or "").strip()
+    # 요청자가 있으면 본인 OAuth(My Drive)로 검색 — 공유 Drive(SHARED_DRIVE_ID) 미설정 환경에서도
+    # 동작. 미연결이면 list_files_by_query 가 error_kind=auth_required → '내 데이터 연결' 안내.
+    if user_email:
+        res = list_files_by_query(query=query, credentials_source="user_oauth", user_email=user_email)
+    else:
+        res = list_files_by_query(query=query, credentials_source="service_account")
+    if not res.ok:
+        return _err(res.error_kind or "http_error")
+    files = res.files or []
+    return {"ok": True, "files": files, "count": len(files), "found": len(files) > 0}
+
+
+def _run_list_confluence_pages_by_author(**kwargs: Any) -> dict[str, Any]:
+    from api.confluence.pages import list_pages_modified
+
+    space_key = str(kwargs.get("space_key") or "")
+    email = str(kwargs.get("modified_by_email") or kwargs.get("user_email") or "")
+    time_min = str(kwargs.get("time_min") or "")
+    time_max = str(kwargs.get("time_max") or "")
+    if not (space_key and email and time_min and time_max):
+        return _err("missing_args", "space_key/modified_by_email/time_min/time_max 필요")
+    res = list_pages_modified(
+        space_key=space_key,
+        modified_by_email=email,
+        time_min=time_min,
+        time_max=time_max,
+        fallback_display_names=_as_list(kwargs.get("fallback_display_names")),
+        limit=int(kwargs.get("limit") or 30),
+    )
+    if not res.ok:
+        return _err(res.error_kind or "http_error")
+    pages = res.pages or []
+    return {"ok": True, "pages": pages, "count": len(pages), "found": len(pages) > 0}
+
+
+def _run_list_drive_files_by_author(**kwargs: Any) -> dict[str, Any]:
+    from api.drive.files import list_files_modified
+
+    email = str(kwargs.get("modified_by_email") or kwargs.get("user_email") or "")
+    time_min = str(kwargs.get("time_min") or "")
+    time_max = str(kwargs.get("time_max") or "")
+    if not (email and time_min and time_max):
+        return _err("missing_args", "modified_by_email/time_min/time_max 필요")
+    # 요청자 본인의 My Drive(user_oauth, 'me' in writers)에서 조회 — '내가 최근 수정한 파일' 대응.
+    # 공유 Drive(SHARED_DRIVE_ID) 미설정 환경에서도 동작. 미연결 시 auth_required.
+    res = list_files_modified(
+        modified_by_email=email,
+        time_min=time_min,
+        time_max=time_max,
+        credentials_source="user_oauth",
+        user_email=email,
+    )
+    if not res.ok:
+        return _err(res.error_kind or "http_error")
+    files = res.files or []
+    return {"ok": True, "files": files, "count": len(files), "found": len(files) > 0}
+
+
+def _run_lookup_team_members(**kwargs: Any) -> dict[str, Any]:
+    """팀원 이름→이메일 조회 — 회의 초대 등에서 사용자에게 되묻지 않고 이메일을 확보."""
+    from firestore.team_config import (
+        find_team_by_email,
+        get_team_config,
+        make_team_id,
+    )
+
+    team_name = str(kwargs.get("team_name") or "").strip()
+    user_email = str(kwargs.get("user_email") or kwargs.get("requester_email") or "").strip()
+    team_id = ""
+    if team_name:
+        team_id = make_team_id(team_name)
+    elif user_email:
+        try:
+            team_id = find_team_by_email(user_email) or ""
+        except Exception:  # noqa: BLE001
+            team_id = ""
+    if not team_id:
+        return {"ok": True, "found": False, "members": [], "detail": "소속 팀을 찾지 못했어요(team_name 또는 요청자 소속팀 필요)."}
+
+    cfg = get_team_config(team_id) or {}
+    members: list[dict[str, Any]] = []
+    for m in cfg.get("team_members") or []:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("name") or "").strip()
+        if not name and not m.get("email"):
+            continue
+        nick = m.get("nickname")
+        nicknames = nick if isinstance(nick, list) else ([str(nick)] if nick else [])
+        members.append(
+            {"name": name, "email": str(m.get("email") or "").strip(), "nickname": [str(n) for n in nicknames]}
+        )
+    return {"ok": True, "found": len(members) > 0, "members": members, "count": len(members)}
+
+
+def _run_lookup_team_vacation(**kwargs: Any) -> dict[str, Any]:
+    """팀 휴가자/부재자 조회 — 휴가 캘린더를 팀 설정에서 해석(사용자에게 되묻지 않음)."""
+    from config.settings import VACATION_CALENDAR_ID
+    from domains.weekly_meeting.schedule_lookup import lookup_member_vacation
+    from firestore.team_config import find_team_by_email, get_team_config, make_team_id
+
+    team_name = str(kwargs.get("team_name") or "").strip()
+    user_email = str(kwargs.get("user_email") or kwargs.get("requester_email") or "").strip()
+    team_id = ""
+    if team_name:
+        team_id = make_team_id(team_name)
+    elif user_email:
+        try:
+            team_id = find_team_by_email(user_email) or ""
+        except Exception:  # noqa: BLE001
+            team_id = ""
+    if not team_id:
+        return {"ok": True, "found": False, "detail": "소속 팀을 찾지 못했어요(team_name 또는 요청자 소속팀 필요)."}
+
+    cfg = get_team_config(team_id) or {}
+    cal_id = str(
+        cfg.get("vacation_calendar_id") or cfg.get("calendar_id") or VACATION_CALENDAR_ID or ""
+    ).strip()
+    if not cal_id:
+        return {"ok": True, "found": False, "detail": "팀 휴가 캘린더가 설정되지 않았어요."}
+
+    keywords: list[str] = []
+    for m in cfg.get("team_members") or []:
+        if not isinstance(m, dict):
+            continue
+        nm = str(m.get("name") or "").strip()
+        if nm:
+            keywords.append(nm)
+        nick = m.get("nickname")
+        for n in nick if isinstance(nick, list) else []:
+            if str(n).strip():
+                keywords.append(str(n).strip())
+    if not keywords:
+        return {"ok": True, "found": False, "detail": "팀원이 설정되지 않아 휴가자를 조회할 수 없어요."}
+
+    res = lookup_member_vacation(
+        member_keywords=keywords,
+        is_next_week=bool(kwargs.get("next_week")),
+        calendar_id=cal_id,
+    )
+    if not res.ok:
+        return _err(res.error_kind or "calendar_http_error")
+    events = res.events or []
+    return {"ok": True, "found": len(events) > 0, "vacations": events, "count": len(events)}
+
+
+def _pick_relevant_page(intent: str, pages: list[dict[str, Any]]) -> int:
+    """검색 결과(여러 페이지) 중 의도에 가장 부합하는 페이지 index 를 LLM 이 고른다. 실패 시 0."""
+    import json as _json
+
+    from domains.agent._llm import PLANNER_MODEL, generate_json
+
+    cand = [{"index": i, "title": str(p.get("title") or "")} for i, p in enumerate(pages[:15])]
+    prompt = (
+        "아래 후보 문서 중 사용자 의도에 가장 부합하는 것 하나의 index 만 고르세요.\n"
+        f"[의도] {intent}\n"
+        f"[후보(index:title)] {_json.dumps(cand, ensure_ascii=False)}\n"
+        '출력: JSON 오브젝트 하나만 — {"index": 0}'
+    )
+    data = generate_json(prompt, model=PLANNER_MODEL)
+    try:
+        idx = int(data.get("index"))
+        if 0 <= idx < len(pages):
+            return idx
+    except (TypeError, ValueError):
+        pass
+    return 0
+
+
+def _run_find_and_read_confluence(**kwargs: Any) -> dict[str, Any]:
+    """Confluence 검색 → 제목 기준 가장 적합한 1건 선택 → 본문 읽기(한 단계). pages[0] 맹신 방지."""
+    from api.confluence.pages import get_page_body, list_pages_by_query
+
+    query = str(kwargs.get("query") or "")
+    if not query.strip():
+        return _err("empty_query", "query 필요")
+    res = list_pages_by_query(
+        query=query,
+        space_key=str(kwargs.get("space_key") or ""),
+        auth_user_email=str(kwargs.get("auth_user_email") or ""),
+        limit=int(kwargs.get("limit") or 20),
+    )
+    if not res.ok:
+        return _err(res.error_kind or "http_error")
+    pages = res.pages or []
+    if not pages:
+        return {"ok": True, "found": False, "detail": f"'{query}' 검색 결과가 없어요."}
+    idx = _pick_relevant_page(str(kwargs.get("intent") or query), pages) if len(pages) > 1 else 0
+    page = pages[idx]
+    page_id = str(page.get("id") or "")
+    body = get_page_body(page_id=page_id, max_chars=int(kwargs.get("max_chars") or 4000))
+    if not body:
+        return {"ok": True, "found": False, "detail": "관련 페이지를 찾았으나 본문을 읽지 못했어요."}
+    return {
+        "ok": True,
+        "found": True,
+        "page_id": page_id,
+        "title": str(page.get("title") or ""),
+        "web_link": str(page.get("web_link") or ""),
+        "content": body,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 생성 도구 — LLM 콘텐츠 생성. 외부 변경이 없으므로 side_effect=False (승인 불필요).
 # 결과 content_html 을 create_confluence_page 에 $ref 로 연결하는 용도.
@@ -450,7 +691,9 @@ def _run_generate_content(**kwargs: Any) -> dict[str, Any]:
         return _err("missing_source", "참조자료(source)가 필요합니다")
     content_type = str(kwargs.get("content_type") or "draft")
     prompt = _build_content_prompt(instruction, source, content_type)
-    text = generate_text(prompt, max_output_tokens=int(kwargs.get("max_tokens") or 1200))
+    # 요약/문서가 중간에 잘리지 않도록 기본 토큰을 넉넉히(1200→2048). 긴 결과의 챗 표시 잘림은
+    # actions._make_push 가 메시지 분할로 처리한다.
+    text = generate_text(prompt, max_output_tokens=int(kwargs.get("max_tokens") or 2048))
     if not text:
         return _err("generation_failed", "콘텐츠 생성 실패")
     return {"ok": True, "content": text, "content_html": _to_html(text)}
@@ -692,6 +935,7 @@ def register_default_tools() -> None:
             "required": ["query"],
         },
         run=_run_search_confluence,
+        examples=[{"when": "사내 위키에서 키워드로 문서 검색", "args": {"query": "온보딩 체크리스트"}}],
     ))
     register(Tool(
         name="find_expert",
@@ -746,6 +990,165 @@ def register_default_tools() -> None:
             "required": [],
         },
         run=_run_find_team_weekly_report,
+        examples=[
+            {"when": "PC2팀 최신 주간보고 요약", "args": {"team_name": "PC2팀", "requester_email": "me@corp.com"}},
+            {"when": "내 팀 최근 주간보고 요약(팀 미지정)", "args": {"requester_email": "me@corp.com"}},
+        ],
+    ))
+    register(Tool(
+        name="list_meeting_rooms",
+        description=(
+            "사내 회의실 목록과 각 방의 예약용 calendar_id(+정원·장비·위치)를 반환한다. "
+            "회의실을 예약(create_meeting)하거나 빈 시간 확인(find_free_slots) 하기 전에 이 도구로 방을 "
+            "찾아 calendar_id 를 얻어라. 인자는 없고 {rooms:[{name,capacity,equipment,location,calendar_id}]} 반환. "
+            "이후 단계에서 특정 방의 calendar_id 는 {\"$ref\": \"<이단계>.rooms.0.calendar_id\"} 로 연결."
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        run=_run_list_meeting_rooms,
+        examples=[{"when": "회의실 예약/빈 회의실 찾기 전에 방 목록·calendar_id 조회", "args": {}}],
+    ))
+    register(Tool(
+        name="search_drive_files",
+        description=(
+            "Drive 를 키워드로 검색한다(제목·본문 fullText). query 와 user_email(요청자)을 받아 "
+            "요청자 본인 Drive(My Drive)에서 검색하고 {files:[{id,name,web_view_link,modified_time}]} 를 "
+            "반환한다(메타데이터·링크만, 본문 미포함). 'Drive/구글드라이브에서 ~자료·문서 찾아줘' 류에 쓴다. "
+            "OAuth 미연결이면 error_kind=auth_required('내 데이터 연결' 안내)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "user_email": {"type": "string", "description": "요청자 이메일(본인 Drive 검색)"},
+            },
+            "required": ["query"],
+        },
+        run=_run_search_drive_files,
+        examples=[{"when": "내 Drive에서 특정 주제 자료 찾기", "args": {"query": "벡터DB", "user_email": "me@corp.com"}}],
+    ))
+    register(Tool(
+        name="list_confluence_pages_by_author",
+        description=(
+            "특정 사용자가 기간 내 수정한 Confluence 페이지 목록을 조회한다(space 한정). "
+            "space_key, modified_by_email(요청자 본인이면 user_email), time_min, time_max(RFC3339)를 받고 "
+            "{pages:[{id,title,modified_time,web_link}]} 를 반환한다. '내가/누가 최근 수정·작성한 페이지' 류. "
+            "본문이 필요하면 get_confluence_page_body 로 이어서 읽어라(page_id={\"$ref\": \"<이단계>.pages.0.id\"})."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "space_key": {"type": "string"},
+                "modified_by_email": {"type": "string", "description": "본인이면 요청자 이메일"},
+                "time_min": {"type": "string", "description": "RFC3339"},
+                "time_max": {"type": "string", "description": "RFC3339"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["space_key", "modified_by_email", "time_min", "time_max"],
+        },
+        run=_run_list_confluence_pages_by_author,
+        examples=[
+            {
+                "when": "내가 이번 달 수정한 Confluence 페이지 조회",
+                "args": {
+                    "space_key": "PC2",
+                    "modified_by_email": "me@corp.com",
+                    "time_min": "2026-06-01T00:00:00Z",
+                    "time_max": "2026-06-30T23:59:59Z",
+                },
+            }
+        ],
+    ))
+    register(Tool(
+        name="list_drive_files_by_author",
+        description=(
+            "요청자 본인의 Drive(My Drive)에서 기간 내 수정한 파일 목록을 조회한다. "
+            "modified_by_email(요청자 이메일), time_min, time_max(RFC3339)를 받고 "
+            "{files:[{id,name,web_view_link,modified_time}]} 를 반환한다. '내가 최근 수정/작업한 파일' 류. "
+            "OAuth 미연결이면 error_kind=auth_required."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "modified_by_email": {"type": "string", "description": "본인이면 요청자 이메일"},
+                "time_min": {"type": "string", "description": "RFC3339"},
+                "time_max": {"type": "string", "description": "RFC3339"},
+            },
+            "required": ["modified_by_email", "time_min", "time_max"],
+        },
+        run=_run_list_drive_files_by_author,
+        examples=[
+            {
+                "when": "내가 최근 일주일간 수정한 Drive 파일 조회",
+                "args": {
+                    "modified_by_email": "me@corp.com",
+                    "time_min": "2026-06-17T00:00:00Z",
+                    "time_max": "2026-06-24T00:00:00Z",
+                },
+            }
+        ],
+    ))
+    register(Tool(
+        name="lookup_team_members",
+        description=(
+            "팀원 이름→이메일 명단을 조회한다. 회의 초대·참석자 이메일이 필요할 때 사용자에게 되묻지 말고 "
+            "이 도구로 먼저 팀원 명단을 확보하라(예: '나랑 서영은 초대' → 명단에서 서영은 이메일 매칭). "
+            "user_email(요청자, 소속팀 자동) 또는 team_name 을 받아 {members:[{name,email,nickname}]} 를 반환. "
+            "이후 create_meeting 의 attendee_emails 를 이 결과에서 채운다."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "team_name": {"type": "string", "description": "예: 'PC2팀'. 없으면 요청자 소속팀"},
+                "user_email": {"type": "string", "description": "요청자 이메일(소속팀 자동 인식)"},
+            },
+            "required": [],
+        },
+        run=_run_lookup_team_members,
+        examples=[
+            {"when": "회의 초대 전 팀원 이메일 확보(이름만 알 때)", "args": {"user_email": "me@corp.com"}},
+        ],
+    ))
+    register(Tool(
+        name="lookup_team_vacation",
+        description=(
+            "팀 휴가자/부재자를 조회한다. user_email(요청자, 소속팀 자동) 또는 team_name, (선택)next_week 를 받아 "
+            "팀 설정의 휴가 캘린더에서 팀원 휴가/연차/반차 일정을 조회하고 {vacations:[{summary,start,end}]} 를 반환한다. "
+            "'이번주 휴가자 누구', '누가 쉬어/연차' 류. 휴가 캘린더는 팀 설정에서 자동 해석하므로 사용자에게 캘린더를 되묻지 말 것."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "team_name": {"type": "string", "description": "예: 'PC2팀'. 없으면 요청자 소속팀"},
+                "user_email": {"type": "string", "description": "요청자 이메일(소속팀 자동)"},
+                "next_week": {"type": "boolean", "description": "다음주면 true(기본: 이번주)"},
+            },
+            "required": [],
+        },
+        run=_run_lookup_team_vacation,
+        examples=[{"when": "이번주 우리팀 휴가자 조회", "args": {"user_email": "me@corp.com"}}],
+    ))
+    register(Tool(
+        name="find_and_read_confluence",
+        description=(
+            "Confluence 에서 문서를 찾아(검색) 제목 기준 가장 적합한 1건을 골라 본문까지 읽어온다. "
+            "query 와 (선택)intent(무엇을 찾는지)·space_key 를 받아 {found, page_id, title, web_link, content} 를 반환한다. "
+            "검색 결과가 여러 개여도 가장 관련 있는 페이지를 자동 선택하므로(엉뚱한 pages[0] 읽기 방지), "
+            "'OO 문서/자료 찾아서 요약' 류에는 search_confluence + get_confluence_page_body 대신 이 도구를 우선 사용하라. "
+            "(주간보고/주간회의는 find_team_weekly_report 우선.) 요약은 content 를 generate_content 의 source 에 $ref 로 연결."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "intent": {"type": "string", "description": "무엇을 찾는지(선택 — 후보 선택 정확도↑)"},
+                "space_key": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+        run=_run_find_and_read_confluence,
+        examples=[
+            {"when": "E-BIZ 시스템 관련 문서 찾아 요약", "args": {"query": "E-BIZ 시스템", "intent": "E-BIZ 시스템 관련 문서"}},
+        ],
     ))
     register(Tool(
         name="get_email_body",
@@ -836,6 +1239,19 @@ def register_default_tools() -> None:
         },
         run=_run_create_meeting,
         side_effect=True,
+        examples=[
+            {
+                "when": "내 캘린더에 회의 생성(빈 시간 확인 후)",
+                "args": {
+                    "calendar_id": "primary",
+                    "user_email": "me@corp.com",
+                    "summary": "팀 동기화",
+                    "meeting_date": "2026-06-25",
+                    "meeting_time": "15:00",
+                    "duration_minutes": 30,
+                },
+            }
+        ],
     ))
     register(Tool(
         name="cancel_meeting",

@@ -53,8 +53,9 @@ def _compute_title_similarities(keyword: str, titles: list[str]) -> dict[str, fl
         return {}
     try:
         model = _get_emb_model()
-        kw_vec = model.get_embeddings([keyword], task_type="RETRIEVAL_QUERY")[0].values
-        title_vecs = model.get_embeddings(unique_titles, task_type="RETRIEVAL_DOCUMENT")
+        # 배포 SDK 의 get_embeddings 는 task_type 인자를 받지 않는다(TypeError) → 빼고 호출.
+        kw_vec = model.get_embeddings([keyword])[0].values
+        title_vecs = model.get_embeddings(unique_titles)
         return {t: _cosine_sim(kw_vec, tv.values) for t, tv in zip(unique_titles, title_vecs)}
     except Exception as e:
         logger.warning("expert_finder embedding 유사도 실패 (폴백 1.0): %s", e)
@@ -157,7 +158,7 @@ def score_candidates(hits: list[dict[str, Any]], keyword: str = "") -> list[dict
         if len(entry["evidence"]) < 5:
             entry["evidence"].append(h)
 
-    out = list(by_email.values())
+    out = _merge_same_person(list(by_email.values()))
     out.sort(key=lambda x: x["score"], reverse=True)
     logger.info(
         "expert_finder scoring candidates=%d top_score=%s",
@@ -165,6 +166,36 @@ def score_candidates(hits: list[dict[str, Any]], keyword: str = "") -> list[dict
         f"{out[0]['score']:.2f}" if out else "0",
     )
     return out
+
+
+def _merge_same_person(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """같은 이름(비어있지 않은) 후보를 하나로 병합 — 동일인이 여러 이메일로 중복 노출되는 것 방지.
+
+    (예: 한 사람이 팀 설정에 여러 이메일로 들어가 있거나 displayName 해석 차이로 2건이 잡힐 때
+    rank 2·3 에 같은 사람이 뜨던 문제.) 이름이 없으면 병합하지 않고(이메일 단위) 그대로 둔다.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    passthrough: list[dict[str, Any]] = []
+    for e in entries:
+        nm = (e.get("name") or "").strip().lower()
+        if not nm:
+            passthrough.append(e)
+            continue
+        if nm not in merged:
+            merged[nm] = dict(e)
+            merged[nm]["hits_by_source"] = dict(e.get("hits_by_source") or {})
+            merged[nm]["evidence"] = list(e.get("evidence") or [])
+            order.append(nm)
+            continue
+        tgt = merged[nm]
+        tgt["score"] = tgt.get("score", 0.0) + e.get("score", 0.0)
+        for src, cnt in (e.get("hits_by_source") or {}).items():
+            tgt["hits_by_source"][src] = tgt["hits_by_source"].get(src, 0) + cnt
+        if not (tgt.get("email") or "").strip() and (e.get("email") or "").strip():
+            tgt["email"] = e["email"]
+        tgt["evidence"] = ((tgt.get("evidence") or []) + (e.get("evidence") or []))[:5]
+    return [merged[k] for k in order] + passthrough
 
 
 # 최근성 가중치 — when (ISO8601) 기준.

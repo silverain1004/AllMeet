@@ -177,8 +177,13 @@ def _schedule_error_lines(error_kind: str, team_name: str) -> list[str]:
 
 
 def handle_weekly_meeting(user_message: str, chat_event: dict[str, Any] | None = None) -> dict[str, Any]:
-    out = build_weekly_meeting_menu_card()
-    out["text"] = "주간보고 메뉴를 선택해 주세요."
+    """'팀 등록/주간회의 팀 등록' 진입 — 팀 추가(team add) 카드를 바로 띄운다.
+
+    구 '주간보고 메뉴' 카드는 폐기. '팀 등록'은 팀관리>팀추가가 가장 관련 높음. 카드 버튼
+    (wm_team_do_add)은 main CARD_CLICKED 이 handle_weekly_meeting_action 으로 라우팅.
+    """
+    out = build_team_add_card()
+    out.setdefault("text", "새 팀을 추가하세요. (팀 ID는 영문/숫자 예: PC2, 팀 이름 입력)")
     return out
 
 

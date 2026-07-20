@@ -30,6 +30,7 @@ def create_plan(
     user_email: str = "",
     ctx_block: str = "",
     memory_block: str = "",
+    recipes_block: str = "",
 ) -> dict[str, Any]:
     """사용자 요청 → 계획 dict.
 
@@ -51,6 +52,7 @@ def create_plan(
         user_email=user_email,
         ctx_block=ctx_block,
         memory_block=memory_block,
+        recipes_block=recipes_block,
     )
     data = generate_json(prompt, model=PLANNER_MODEL)
     if not data:

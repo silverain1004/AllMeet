@@ -107,16 +107,16 @@ def lookup_email_by_display_name(display_name: str, member_pool: list[dict[str, 
     needle = (display_name or "").strip().lower()
     if not needle or not member_pool:
         return None
+    # 정확 매칭만 — 과거 loose substring(needle in name) 매칭은 동명이인·부분일치로 다른 사람의
+    # 이메일을 잘못 반환해(→ 팀 오표시·중복) 버그를 냈다. 이름 또는 닉네임이 정확히 같을 때만 매칭.
     for m in member_pool:
         email = (m.get("email") or "").strip()
         if not email:
             continue
-        name = (m.get("name") or "").strip().lower()
-        if name and (name == needle or needle in name or name in needle):
+        if (m.get("name") or "").strip().lower() == needle:
             return email
         for nick in m.get("nickname") or []:
-            nl = (nick or "").strip().lower()
-            if nl and (nl == needle or needle in nl or nl in needle):
+            if (nick or "").strip().lower() == needle:
                 return email
     return None
 

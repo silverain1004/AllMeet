@@ -19,6 +19,7 @@ def build_planner_prompt(
     user_email: str,
     ctx_block: str = "",
     memory_block: str = "",
+    recipes_block: str = "",
 ) -> str:
     """Phase A — 실행 없는 구조화 계획(JSON)을 만들게 하는 프롬프트."""
     tools_json = json.dumps(catalog, ensure_ascii=False, indent=2)
@@ -26,6 +27,12 @@ def build_planner_prompt(
     mem = (
         f"\n[내가 최근 만든 산출물(연속 작업 시 참고)]\n{memory_block}\n"
         if (memory_block or "").strip()
+        else ""
+    )
+    rec = (
+        "\n[비슷한 과거 성공 사례 — 팀이 같은 류 요청을 어떤 도구 순서로 해결했는지. "
+        f"패턴만 참고하고 그대로 베끼지 말 것; 현재 요청에 맞게 도구/인자를 설계하라]\n{recipes_block}\n"
+        if (recipes_block or "").strip()
         else ""
     )
     return f"""당신은 기업용 업무 에이전트 'All-Meet'의 플래너입니다.
@@ -55,12 +62,12 @@ def build_planner_prompt(
 - 정보가 부족해 계획을 못 세우면 steps 를 빈 배열로 두고 ask_user 에 사용자에게 물을 한 문장을 적는다.
 - 사용자가 명시하지 않은 사람에게 메일/초대를 보내지 않는다.
 
-[사용 가능한 도구]
+[사용 가능한 도구] — 각 도구의 examples 는 "언제·어떤 args 로" 쓰는지 대표 사용예다(있으면 참고).
 {tools_json}
 
 [맥락]
 오늘 날짜: {today}
-사용자: {user_name} <{user_email}>{ctx}{mem}
+사용자: {user_name} <{user_email}>{ctx}{mem}{rec}
 
 [출력 형식] — JSON 오브젝트 하나만. 설명/코드펜스 없이.
 {{

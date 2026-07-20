@@ -73,21 +73,36 @@ def test_cta_card_preview_contains_outline_steps():
     assert "참석자 초대/알림" in text
 
 
-def test_ag_delegate_routes_to_handle_agent_request():
+def test_ag_delegate_auto_runs_in_background_with_space():
+    """'AI에게 맡기기'는 승인 카드(handle_agent_request) 대신 자동 승인·실행(백그라운드)."""
     from domains.agent import actions
 
     chat_event = {"type": "CARD_CLICKED", "space": {"name": "spaces/AAA"}}
-    with patch.object(actions, "handle_agent_request", return_value={"text": "계획 카드"}) as mock_req:
+    with patch.object(actions, "handle_agent_request") as mock_req, patch(
+        "api.chat.loading.start_background"
+    ) as mock_bg, patch("api.chat.loading.loading_text", return_value={"text": "⏳"}):
         out = actions.handle_agent_action(
             invoked_function="ag_delegate",
             parameters={"user_message": "회의 잡고 페이지도 만들어줘", "intent": "schedule_management"},
             chat_event=chat_event,
         )
-    mock_req.assert_called_once_with(
-        "회의 잡고 페이지도 만들어줘",
-        chat_event=chat_event,
-        ctx_block="",
-    )
+    mock_bg.assert_called_once()
+    assert mock_bg.call_args.args[0] is actions._run_delegate_background
+    mock_req.assert_not_called()  # 승인 카드 경로를 타지 않음
+    assert out == {"text": "⏳"}
+
+
+def test_ag_delegate_without_space_falls_back_to_request():
+    from domains.agent import actions
+
+    chat_event = {"type": "CARD_CLICKED"}  # space 없음 → 동기 폴백
+    with patch.object(actions, "handle_agent_request", return_value={"text": "계획 카드"}) as mock_req:
+        out = actions.handle_agent_action(
+            invoked_function="ag_delegate",
+            parameters={"user_message": "회의 잡아줘"},
+            chat_event=chat_event,
+        )
+    mock_req.assert_called_once()
     assert out == {"text": "계획 카드"}
 
 

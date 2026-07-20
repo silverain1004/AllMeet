@@ -404,10 +404,32 @@ def _validate_time_state(state: dict[str, Any]) -> list[str]:
     return errors
 
 
+_BOOK_VERB_RE = re.compile(r"(예약|잡아|잡아줘|예약해|잡아\s*주)")
+_ROOM_WORD_RE = re.compile(r"(회의실|미팅룸|세미나실|컨퍼런스룸)")
+_LIST_WORD_RE = re.compile(r"(목록|뭐|무슨|어떤|있어|있나|있는지|리스트|보여|알려|뭐가)")
+
+
+def _is_room_list_query(user_message: str) -> bool:
+    """'회의실 뭐 있어/목록/어떤' 류 — 예약이 아니라 회의실 목록 조회 의도."""
+    text = (user_message or "").strip()
+    if not text or _BOOK_VERB_RE.search(text):
+        return False
+    return bool(_ROOM_WORD_RE.search(text)) and bool(_LIST_WORD_RE.search(text))
+
+
 def handle_schedule_management(
     user_message: str,
     chat_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # '회의실 뭐 있어/목록' 류는 예약 카드가 아니라 회의실 목록 카드를 보여준다.
+    if _is_room_list_query(user_message):
+        from domains.schedule_management.rooms_store import get_rooms
+        from domains.settings.cards import build_room_list_card
+
+        out = build_room_list_card(get_rooms(), region_label="군산")
+        out["text"] = "등록된 회의실 목록입니다."
+        return out
+
     members = get_all_members()
     extracted = extract_compose_state_with_llm_fallback(user_message, members=members)
     state = _merge_extracted_state(empty_compose_state(), extracted)

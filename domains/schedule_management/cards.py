@@ -1102,11 +1102,11 @@ def _availability_badge(room: dict[str, Any]) -> str:
 
     if label == "사용 가능":
 
-        return "● 사용 가능"
+        return "🟢 사용 가능"
 
     if label == "사용 중":
 
-        return "● 사용 중"
+        return "🔴 사용 중"
 
     return ""
 

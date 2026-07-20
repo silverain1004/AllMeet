@@ -427,13 +427,23 @@ def execute_plan(plan_id: str, *, push: Callable[[str], None] | None = None) -> 
             outcome["message"] = f"⚠️ 목표를 달성하지 못했어요: {reason}"
             store.set_status(plan_id, store.STATUS_FAILED, error=reason)
             return outcome
-        from domains.agent import memory
+        from domains.agent import memory, recipes
 
         memory.record_artifacts(
             plan.get("user_email") or "",
             plan.get("goal") or "",
             outcome.get("results") or {},
         )
+        # 검증된 성공 계획을 팀 레시피로 학습 — 유사 요청에 few-shot 으로 회상(쓸수록 똑똑해지는 루프).
+        try:
+            recipes.record_recipe(
+                plan.get("user_email") or "",
+                plan.get("goal") or "",
+                plan.get("steps") or [],
+                plan.get("planner_model") or "",
+            )
+        except Exception:  # noqa: BLE001 - 학습 실패가 본 작업을 막지 않도록
+            logger.warning("record_recipe 훅 실패", exc_info=True)
         store.set_status(plan_id, store.STATUS_DONE)
     elif kind == OUTCOME_NEEDS_REAPPROVAL:
         store.update_steps(plan_id, outcome.get("steps") or [])

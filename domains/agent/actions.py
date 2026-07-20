@@ -38,8 +38,29 @@ def _space_name(chat_event: dict[str, Any] | None) -> str:
     return str(((chat_event or {}).get("space") or {}).get("name") or "").strip()
 
 
+_CHAT_TEXT_LIMIT = 3900  # Google Chat text 메시지 한도(~4096자) 안전 마진
+
+
+def _split_for_chat(text: str, limit: int = _CHAT_TEXT_LIMIT) -> list[str]:
+    """긴 텍스트를 챗 메시지 한도 이하 청크로 분할(가능하면 줄바꿈 경계). 빈 입력은 빈 청크 1개."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return [text] if text else [""]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 0, limit)
+        if cut < limit // 2:  # 줄바꿈이 너무 앞쪽이면 그냥 한도에서 자른다
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining.strip():
+        chunks.append(remaining)
+    return chunks
+
+
 def _make_push(space_name: str):
-    """진행상황을 space 로 push 하는 함수. space 없으면 no-op."""
+    """진행상황을 space 로 push 하는 함수. space 없으면 no-op. 긴 텍스트는 여러 메시지로 분할."""
     if not space_name:
         return lambda _msg: None
 
@@ -47,7 +68,8 @@ def _make_push(space_name: str):
         try:
             from api.chat.messages import post_message_to_space
 
-            post_message_to_space(space_name=space_name, payload={"text": text})
+            for chunk in _split_for_chat(text):
+                post_message_to_space(space_name=space_name, payload={"text": chunk})
         except Exception:
             logger.warning("agent 진행상황 push 실패", exc_info=True)
 
@@ -96,12 +118,16 @@ def _build_plan_response(
     from domains.agent import memory
 
     memory_block = memory.format_memory_block(memory.load_user_memory(user_email))
+    from domains.agent import recipes
+
+    recipes_block = recipes.format_recipes_block(recipes.recall_recipes(user_email, user_message))
     plan = create_plan(
         user_message,
         user_name=user_name,
         user_email=user_email,
         ctx_block=ctx_block,
         memory_block=memory_block,
+        recipes_block=recipes_block,
     )
 
     if not plan.get("steps"):
@@ -218,12 +244,16 @@ def _build_clarify_response(
     merged = _merge_clarification(str(existing.get("goal") or ""), answer)
 
     memory_block = memory.format_memory_block(memory.load_user_memory(user_email))
+    from domains.agent import recipes
+
+    recipes_block = recipes.format_recipes_block(recipes.recall_recipes(user_email, merged))
     plan = create_plan(
         merged,
         user_name=user_name,
         user_email=user_email,
         ctx_block=ctx_block,
         memory_block=memory_block,
+        recipes_block=recipes_block,
     )
 
     # 명료화 레코드는 어느 경로로 끝나든 닫는다(steps 성공·재명료화·포기) — 누수 방지.
@@ -434,7 +464,15 @@ def handle_agent_action(
             return {"text": "맡길 요청 내용을 찾지 못했어요. 다시 말씀해 주세요."}
         from domains.routing.context import load_ctx_block
 
-        return handle_agent_request(msg, chat_event=chat_event, ctx_block=load_ctx_block(chat_event or {}))
+        ctx_block = load_ctx_block(chat_event or {})
+        space_name = _space_name(chat_event)
+        # '맡기기'=승인 간주 → 승인 카드 없이 자동 승인·실행(계획은 보이지 않게). space 없으면 동기 폴백.
+        if not space_name:
+            return handle_agent_request(msg, chat_event=chat_event, ctx_block=ctx_block)
+        from api.chat.loading import loading_text, start_background
+
+        start_background(_run_delegate_background, msg, chat_event, ctx_block)
+        return loading_text("맡겨주신 작업을 바로 진행할게요…")
 
     plan_id = (parameters or {}).get("plan_id", "").strip()
     if not plan_id:
@@ -504,3 +542,61 @@ def _run_plan_background(plan_id: str, space_name: str) -> None:
         push(outcome.get("message", "완료"))
     else:  # failed
         push(outcome.get("message", "작업을 끝내지 못했어요."))
+
+
+def _run_delegate_background(
+    user_message: str,
+    chat_event: dict[str, Any] | None,
+    ctx_block: str,
+) -> None:
+    """'AI에게 맡기기' — 계획을 세워 자동 승인·실행(승인 카드 없이 진행상황만 push).
+
+    위임=승인 간주. 정보가 부족하면(steps 없음) 위임이라도 한 번은 되물어야 하므로 명료화로 전환.
+    실행 중 '승인 범위 밖 새 side_effect' 가 나오면 _run_plan_background 가 재승인 카드를 띄운다(안전 유지).
+    """
+    space_name = _space_name(chat_event)
+    if not space_name:
+        return
+    push = _make_push(space_name)
+    user_email = _user_email(chat_event)
+    user_name = _user_name(chat_event)
+    try:
+        from domains.agent import memory, recipes
+
+        memory_block = memory.format_memory_block(memory.load_user_memory(user_email))
+        recipes_block = recipes.format_recipes_block(recipes.recall_recipes(user_email, user_message))
+        plan = create_plan(
+            user_message,
+            user_name=user_name,
+            user_email=user_email,
+            ctx_block=ctx_block,
+            memory_block=memory_block,
+            recipes_block=recipes_block,
+        )
+    except Exception:
+        logger.exception("agent delegate 계획 생성 실패")
+        push("작업 계획을 세우지 못했어요. 잠시 후 다시 시도해 주세요.")
+        return
+
+    if not plan.get("steps"):
+        ask = plan.get("ask_user") or "요청을 진행하려면 조금 더 구체적인 정보가 필요해요."
+        if user_email:
+            try:
+                store.save_clarification(user_message, ask, user_email=user_email, space_name=space_name)
+            except Exception:
+                logger.exception("clarification 저장 실패")
+        from api.chat.messages import post_message_to_space
+
+        post_message_to_space(space_name=space_name, payload=cards.build_ask_user_card(ask))
+        return
+
+    try:
+        plan_id = store.save_plan(plan, user_email=user_email, space_name=space_name)
+        store.set_status(plan_id, store.STATUS_APPROVED)  # 위임=승인 간주(승인 카드 생략)
+    except Exception:
+        logger.exception("agent delegate 계획 저장 실패")
+        push("계획을 저장하지 못했어요. 잠시 후 다시 시도해 주세요.")
+        return
+
+    push("✅ 맡겨주신 작업을 바로 진행할게요. 진행 상황을 알려드릴게요.")
+    _run_plan_background(plan_id, space_name)

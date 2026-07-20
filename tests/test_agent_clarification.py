@@ -30,6 +30,8 @@ def test_clarification_replan_success_builds_approval_card():
         "domains.agent.memory.load_user_memory", return_value=[]
     ), patch(
         "domains.agent.memory.format_memory_block", return_value=""
+    ), patch(
+        "domains.agent.recipes.recall_recipes", return_value=[]
     ):
         out = actions._build_clarify_response(
             "E-BIZ 시스템 관련",
@@ -63,6 +65,8 @@ def test_clarification_replan_still_missing_saves_followup():
         "domains.agent.memory.load_user_memory", return_value=[]
     ), patch(
         "domains.agent.memory.format_memory_block", return_value=""
+    ), patch(
+        "domains.agent.recipes.recall_recipes", return_value=[]
     ):
         out = actions._build_clarify_response(
             "음 그냥",
@@ -94,6 +98,8 @@ def test_clarification_gives_up_after_cap():
         "domains.agent.memory.load_user_memory", return_value=[]
     ), patch(
         "domains.agent.memory.format_memory_block", return_value=""
+    ), patch(
+        "domains.agent.recipes.recall_recipes", return_value=[]
     ):
         out = actions._build_clarify_response(
             "음",

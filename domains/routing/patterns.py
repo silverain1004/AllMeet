@@ -123,11 +123,15 @@ def looks_like_expert_finder(msg: str) -> bool:
 
 
 def looks_like_schedule_booking(msg: str) -> bool:
-    """'회의실 예약' 또는 '빈 시간 찾아 잡기'. 문서·일정표 요약 류는 미매치."""
+    """'회의실 예약/목록' 또는 '빈 시간 찾아 잡기'. 문서·일정표 요약 류는 미매치.
+
+    회의실 목록 질의('회의실 뭐 있어')도 schedule_management 로 보낸다 — 핸들러가 목록/예약을
+    구분(_is_room_list_query)하므로, LLM 흔들림 없이 결정적으로 회의실 도메인에 도달시킨다.
+    """
     text = (msg or "").strip()
     if not text:
         return False
-    if _ROOM_RE.search(text) and _BOOK_VERB_RE.search(text):
+    if _ROOM_RE.search(text):  # '회의실'이 들어가면(예약/목록 모두) 회의실 도메인
         return True
     if _FREE_SLOT_RE.search(text) and re.search(r"(찾아|잡|예약)", text):
         return True
@@ -154,3 +158,29 @@ def looks_actionable_for_recovery(msg: str) -> bool:
     if not text:
         return False
     return bool(_RECOVERY_NOUN_RE.search(text) and _RECOVERY_VERB_RE.search(text))
+
+
+# 개인 일정 조회/요약 — 주어가 없으면 보통 '내 캘린더'. agent(list_calendar_events)로 보낸다.
+# 회의실 예약(booking)과는 구분(예약/잡기/회의실은 schedule_management).
+_SCHEDULE_NOUN_RE = re.compile(r"(일정|스케줄|캘린더)")
+_SCHEDULE_ASK_RE = re.compile(r"(요약|정리|알려|보여|확인|뭐|뭐야|있어|있나|어때|있는지)")
+_SCHEDULE_BOOK_EXCL_RE = re.compile(r"(회의실|예약|잡아|잡아줘|잡기)")
+# 휴가/부재 조회 — agent(lookup_team_vacation)로.
+_VACATION_RE = re.compile(r"(휴가|연차|반차|쉬는|쉬어|쉬나|쉬어요|부재|자리\s*비)")
+_VACATION_ASK_RE = re.compile(r"(누구|누가|언제|있어|있나|뭐|알려|정리|확인)")
+
+
+def looks_like_my_schedule(msg: str) -> bool:
+    """'(이번주/오늘) 일정 요약/알려줘' 류 — 개인 캘린더 조회. 회의실 예약류는 제외."""
+    text = (msg or "").strip()
+    if not text or _SCHEDULE_BOOK_EXCL_RE.search(text):
+        return False
+    return bool(_SCHEDULE_NOUN_RE.search(text) and _SCHEDULE_ASK_RE.search(text))
+
+
+def looks_like_vacation_query(msg: str) -> bool:
+    """'누가 쉬어/휴가자 누구/연차 누구' 류 — 팀 휴가 조회."""
+    text = (msg or "").strip()
+    if not text:
+        return False
+    return bool(_VACATION_RE.search(text) and _VACATION_ASK_RE.search(text))

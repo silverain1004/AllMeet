@@ -22,6 +22,8 @@ class Tool:
         parameters: JSON schema (type=object). 인자 추출 가이드.
         run: ``run(**args) -> dict`` 실제 실행 어댑터. 정규화된 결과 dict 반환.
         side_effect: True 면 되돌릴 수 없는 작업 → 승인 게이트/dry-run 대상.
+        examples: 플래너 few-shot용 대표 사용예. ``[{"when": "언제 쓰는지", "args": {...}}]``.
+            카탈로그 직렬화·검색(select_catalog) 에 함께 노출돼 플래너의 도구 선택을 돕는다.
     """
 
     name: str
@@ -29,6 +31,7 @@ class Tool:
     parameters: dict[str, Any] = field(default_factory=dict)
     run: Callable[..., dict[str, Any]] = field(default=lambda **_: {"ok": False})
     side_effect: bool = False
+    examples: list[dict[str, Any]] = field(default_factory=list)
 
 
 TOOL_REGISTRY: dict[str, Tool] = {}
@@ -48,12 +51,15 @@ def list_tools() -> list[Tool]:
 
 
 def _serialize(tool: Tool) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "name": tool.name,
         "description": tool.description,
         "parameters": tool.parameters,
         "side_effect": tool.side_effect,
     }
+    if tool.examples:  # examples 없는 도구는 프롬프트 비대 방지를 위해 키 자체를 생략
+        out["examples"] = tool.examples
+    return out
 
 
 def tools_catalog() -> list[dict[str, Any]]:
@@ -70,17 +76,20 @@ def _tokens(text: str) -> set[str]:
 
 
 def _score_tool(tool: Tool, query_tokens: set[str]) -> int:
-    """요청 토큰이 도구 name+description 에 얼마나 등장하는지(부분일치) 셈."""
-    text = f"{tool.name} {tool.description}".lower()
+    """요청 토큰이 도구 name+description+examples 에 얼마나 등장하는지(부분일치) 셈."""
+    example_text = " ".join(str(e.get("when") or "") for e in tool.examples)
+    text = f"{tool.name} {tool.description} {example_text}".lower()
     return sum(1 for t in query_tokens if t in text)
 
 
-def select_catalog(user_message: str, *, max_tools: int = 15) -> list[dict[str, Any]]:
+def select_catalog(user_message: str, *, max_tools: int = 30) -> list[dict[str, Any]]:
     """요청과 관련된 도구만 골라 직렬화한 카탈로그(retrieval).
 
-    - 등록 도구 수가 ``max_tools`` 이하면 전체 반환(현재 규모에선 동작 불변).
+    - 등록 도구 수가 ``max_tools`` 이하면 전체 반환(현재 ~19개 규모에선 전체 노출 = 동작 불변).
     - 초과 시: side_effect 도구는 누락 위험을 없애려 항상 포함하고, 나머지(읽기/생성)는
-      요청 키워드 스코어 상위로 채워 ``max_tools`` 개로 제한한다.
+      요청 키워드(+examples) 스코어 상위로 채워 ``max_tools`` 개로 제한한다.
+      도구가 더 늘어 가지치기가 켜지면, generate_content 처럼 사실상 범용인 도구는 항상포함을
+      검토할 것(키워드 미스 시 누락 방지).
     - 등록 순서를 보존해 직렬화한다.
     """
     tools = list(TOOL_REGISTRY.values())

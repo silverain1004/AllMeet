@@ -37,17 +37,19 @@ agent — 여러 단계·도구를 엮는 복합 업무 (Confluence/페이지 �
   NO: "오늘 날씨 알려줘"(daily_chat), "Kafka 전문가 추천"(expert_finder)
 
 daily_chat — 일상 대화·단순 질문·단일 정보·비유적 표현·봇이 직접 답 가능한 단일 요약
-  YES: "점심 메뉴 추천해줘", "Kafka를 전문가처럼 쉽게 설명해줘", "회의 일정표 요약해줘"(본문 없이)
+  YES: "점심 메뉴 추천해줘", "Kafka를 전문가처럼 쉽게 설명해줘"
   NO: "Kafka 전문가 찾아줘"(expert_finder), "회의실 예약해줘"(schedule_management)
   NO: "페이지 찾아서 요약"(agent — 사내 시스템 조회 필요)
+  NO: "(이번주/내) 일정 요약·알려줘"(agent — 내 캘린더 조회), "누가 쉬어/휴가자 누구"(agent — 휴가 조회)
+  ※ 주어 없는 '일정/휴가' 조회는 보통 요청자 개인 것 → agent(캘린더). daily_chat 으로 떨구지 말 것.
 
 expert_finder — 사내 전문가·담당자 추천/검색 기능 호출
   YES: "Kafka 전문가 추천해줘", "이 분야 담당자 찾아줘"
   NO: "전문가처럼 설명해줘"(daily_chat), "전문 용어 뜻 알려줘"(daily_chat)
 
-schedule_management — 회의실·캘린더·일정 예약·빈 시간 찾기 기능 호출
+schedule_management — 회의실·캘린더 예약·빈 시간 찾기 기능 호출(예약/잡기)
   YES: "내일 3시 회의실 예약해줘", "빈 시간 찾아서 잡아줘"
-  NO: "회의 일정표 요약해줘"(daily_chat), "예약 기록 문서 찾아줘"(agent)
+  NO: "회의/내 일정 요약·알려줘"(agent — 캘린더 조회), "예약 기록 문서 찾아줘"(agent)
 
 weekly_report_draft — '주간보고 초안' 기능 직접 호출(작성/받기)만
   YES: "주간보고 초안 받기", "주간보고초안"
@@ -234,7 +236,9 @@ def _deterministic_label(msg: str, ctx_block: str) -> tuple[str, str] | None:
         looks_like_agent_task,
         looks_like_expert_finder,
         looks_like_home_greeting,
+        looks_like_my_schedule,
         looks_like_schedule_booking,
+        looks_like_vacation_query,
         looks_like_weekly_meeting_setup,
     )
 
@@ -247,6 +251,11 @@ def _deterministic_label(msg: str, ctx_block: str) -> tuple[str, str] | None:
         return "home_menu", "home_greeting"
     if looks_like_agent_task(msg):
         return "agent", "agent_pattern"
+    # 개인 일정 요약·휴가 조회는 agent(list_calendar_events/lookup_team_vacation)로 — daily_chat 거부 방지.
+    if looks_like_vacation_query(msg):
+        return "agent", "vacation_agent"
+    if looks_like_my_schedule(msg):
+        return "agent", "schedule_summary_agent"
     if looks_like_expert_finder(msg):
         return "expert_finder", "expert_fastpath"
     if looks_like_schedule_booking(msg):

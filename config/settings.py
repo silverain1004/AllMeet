@@ -27,6 +27,11 @@ ALLMEET_PLANNER_MODEL = os.environ.get("ALLMEET_PLANNER_MODEL") or "gemini-2.5-p
 # 지연·비용 부담 시 ALLMEET_INTENT_MODEL=gemini-2.5-flash 로 즉시 회귀 가능.
 ALLMEET_INTENT_MODEL = os.environ.get("ALLMEET_INTENT_MODEL") or ALLMEET_PLANNER_MODEL
 
+# 팀 공유 절차적 레시피 메모리 on/off (검증된 성공 계획을 학습해 유사 요청에 few-shot 주입).
+# 런타임 토글을 위해 호출 측(domains/agent/recipes._enabled)은 os.environ 을 직접 확인 —
+# 이 상수는 기본값·문서화용. 끄려면 ALLMEET_RECIPE_MEMORY=0.
+ALLMEET_RECIPE_MEMORY = os.environ.get("ALLMEET_RECIPE_MEMORY", "1")
+
 # Drive — 센터 Shared Drive ID (drive.google.com 의 공유 드라이브 URL 끝의 문자열).
 # Phase 1 prerequisite: SA 가 이 Shared Drive 에 멤버로 등록되어 있어야 함.
 SHARED_DRIVE_ID = os.environ.get("SHARED_DRIVE_ID") or ""

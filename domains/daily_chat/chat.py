@@ -54,7 +54,10 @@ def _yes_no_classify(user_message: str, ctx_block: str, *, criteria: str, log_fa
         body += f'사용자 마지막 발화: "{msg}"\n\n분류:'
         res = _get_generative_model().generate_content(
             body,
-            generation_config=GenerationConfig(temperature=0, max_output_tokens=8),
+            # flash 2.5 는 thinking 모델 — max_output_tokens 가 너무 작으면(예: 8) thinking 이
+            # budget 을 다 먹어 finish_reason=MAX_TOKENS 로 답(yes/no)이 비어 버린다.
+            # is_plan_revision/_needs_web_search 가 매번 실패하던 원인 → 넉넉히 준다.
+            generation_config=GenerationConfig(temperature=0, max_output_tokens=512),
         )
         raw = (res.text or "").strip().lower()
         if not raw:

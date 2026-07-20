@@ -20,7 +20,9 @@ ROUTING_MATRIX = [
     ("E-BIZ 찾고 배포 체크리스트 만들어줘", "agent"),
     ("최신 주간보고 페이지 찾아서 요약해줘", "agent"),
     ("PC2팀 최근 주간보고 요약해줘", "agent"),
-    ("회의 일정표 요약해줘", "daily_chat"),
+    ("회의 일정표 요약해줘", "agent"),
+    ("이번주 일정 요약해줘", "agent"),
+    ("다음주 누구 쉬어?", "agent"),
 ]
 
 
@@ -253,7 +255,7 @@ def test_intent_criteria_contains_disambiguation_examples():
     assert "expert_finder" in criteria
     assert "schedule_management" in criteria
     assert "전문가처럼" in criteria
-    assert "회의 일정표" in criteria
+    assert "캘린더 조회" in criteria
 
 
 def test_load_ctx_block_from_message():
@@ -327,10 +329,12 @@ def test_deterministic_intent_helper():
     assert deterministic_intent("최신 주간보고 페이지 찾아서 요약해줘") == "agent"
     assert deterministic_intent("설정") == "settings"
     assert deterministic_intent("안녕") == "home_menu"
+    # 개인 일정/휴가 조회는 agent (주어 없으면 내 캘린더)
+    assert deterministic_intent("이번주 일정 요약해줘") == "agent"
+    assert deterministic_intent("다음주 누구 쉬어?") == "agent"
     # 애매한 발화는 None → LLM(pro) 폴백
     assert deterministic_intent("E-BIZ 시스템 관련") is None
     assert deterministic_intent("점심 메뉴 추천해줘") is None
-    assert deterministic_intent("회의 일정표 요약해줘") is None
 
 
 def test_recovery_cta_wraps_actionable_daily_chat():
