@@ -66,6 +66,22 @@ def _build_edit_dialog_inner(*, draft_ref_id: str, user_email: str) -> dict[str,
                     }
                 }
             )
+            # 항목 삭제 체크박스 — 체크하거나 위 입력칸을 비우면 삽입에서 제외됨
+            widgets.append(
+                {
+                    "selectionInput": {
+                        "name": f"{prefix}_{i}_del",
+                        "type": "CHECK_BOX",
+                        "items": [
+                            {
+                                "text": f"↑ {header} {i + 1} 삭제",
+                                "value": "1",
+                                "selected": False,
+                            }
+                        ],
+                    }
+                }
+            )
 
     if not widgets:
         return _error_dialog("수정할 초안 내용이 없어요.")
@@ -119,23 +135,35 @@ def handle_save_and_insert(
     draft = doc_data["draft"]
 
     # form_inputs: {"proj_0": {"stringInputs": {"value": ["..."]}, ...}}
+    # 입력칸을 비우거나 '삭제' 체크박스를 켜면 해당 항목을 draft 에서 제거한다.
+    # 주의: Google Chat 은 값이 빈 입력칸을 formInputs 에서 아예 생략한다.
+    #       Dialog 는 모든 dict 항목을 렌더하므로, 렌더된 항목의 키가 없으면 = 사용자가 비운 것.
+    has_form = bool(form_inputs)
     for prefix, key in (("proj", "projects"), ("ops", "operations")):
         items = draft.get(key) or []
+        new_items: list = []
         for i, it in enumerate(items):
             if not isinstance(it, dict):
+                new_items.append(it)  # 비-dict 항목은 원형 보존
                 continue
-            raw_list = (
-                ((form_inputs.get(f"{prefix}_{i}") or {}).get("stringInputs") or {})
-                .get("value") or [""]
-            )
+            if _is_delete_checked(form_inputs, f"{prefix}_{i}_del"):
+                continue  # 명시적 삭제 체크 → 제거
+            field = form_inputs.get(f"{prefix}_{i}")
+            if field is None:
+                # 빈 입력칸(생략)이면 삭제. 단 form 전체가 비어 오면(제출 오류)
+                # 전체 초안이 통째로 삭제되는 사고를 막기 위해 보존한다.
+                if not has_form:
+                    new_items.append(it)
+                continue
+            raw_list = (field.get("stringInputs") or {}).get("value") or [""]
             text = (raw_list[0] if raw_list else "").strip()
             if not text:
-                continue
+                continue  # 입력칸을 비움 → 항목 삭제
             task_line, details = _parse_task_text(text)
-            if task_line:
-                it["task"] = task_line
-            if details is not None:
-                it["details"] = details
+            it["task"] = task_line
+            it["details"] = details
+            new_items.append(it)
+        draft[key] = new_items
 
     # Firestore 업데이트
     _update_draft_in_firestore(draft_ref_id, draft)
@@ -180,6 +208,13 @@ def _insert_and_notify(user_email: str, draft_ref_id: str, space_name: str) -> N
 # ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
+
+def _is_delete_checked(form_inputs: dict[str, Any], name: str) -> bool:
+    """'삭제' 체크박스가 선택됐는지 확인 (CHECK_BOX 선택값 '1' 포함 여부)."""
+    field = form_inputs.get(name) or {}
+    values = (field.get("stringInputs") or {}).get("value") or []
+    return "1" in values
+
 
 def _parse_task_text(text: str) -> tuple[str, list[str]]:
     """multiLine 텍스트 → (task_line, details).

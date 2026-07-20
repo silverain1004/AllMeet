@@ -196,8 +196,10 @@ def build_oauth_link_card(
             "textParagraph": {
                 "text": (
                     "<b>🔍 연결되는 범위</b><br>"
-                    "• <b>Gmail</b> — 제목·발신자·날짜 등 <b>메타데이터만</b> 읽어요 "
-                    "(<b>본문은 읽지 않습니다</b>)<br>"
+                    "• <b>Gmail</b> — 제목·발신자·날짜 등 메타데이터를 읽고, "
+                    "<b>주간보고 초안·오늘의 할 일</b>을 만들 때는 관련 있는 일부 메일의 "
+                    "<b>본문도 읽어요</b> (이 본문은 <b>나에게만</b> 보이는 초안에만 쓰이고 "
+                    "다른 동료에게 노출되지 않아요)<br>"
                     "• <b>개인 Calendar</b> — 일정 조회 및 회의 예약<br>"
                     "• <b>내 Drive</b> — 내가 만들거나 수정한 문서"
                 )
@@ -303,7 +305,7 @@ def build_schedule_calendar_id_card(
         {"selectionInput": {"name": "team_id", "label": "팀 선택", "type": "DROPDOWN", "items": _team_items(teams, selected_team_id=selected_team_id)}},
         {"buttonList": {"buttons": [{"text": "기존값 불러오기", "onClick": {"action": {"function": "wm_schedule_load_calendar_id"}}}]}},
         {"textInput": {"name": "calendar_id", "label": "주간회의 Calendar ID", "value": current_calendar_id}},
-        {"textInput": {"name": "vacation_calendar_id", "label": "휴가 Calendar ID (일정 공유 표용, 비우면 위 ID 사용)", "value": current_vacation_calendar_id}},
+        {"textInput": {"name": "vacation_calendar_id", "label": "휴가 Calendar ID (일정 공유 표용, 비우면 기본 휴가 캘린더 사용)", "value": current_vacation_calendar_id}},
         {"buttonList": {"buttons": [{"text": "저장", "onClick": {"action": {"function": "wm_schedule_save_calendar_id"}}}]}},
         {"buttonList": {"buttons": [{"text": "일정 조회로 돌아가기", "onClick": {"action": {"function": "wm_open_schedule_menu"}}}]}},
     ]

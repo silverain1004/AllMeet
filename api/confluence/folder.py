@@ -5,10 +5,41 @@ resolve_report_folders는 client를 파라미터로 받도록 수정.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Optional, Tuple, Union
 
 from api.confluence.client import ConfluenceClient
+
+# 연도 폴더 제목에서 4자리 연도(19xx/20xx) 추출용
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+def _derive_year_folder_title(children: list, year: int) -> str:
+    """기존 형제 연도 폴더의 네이밍 규칙을 따라 새 연도 폴더 제목을 만든다.
+
+    예) 형제로 '2026년_주간회의' 가 있으면 year=2027 → '2027년_주간회의'.
+        형제로 '2026' 만 있으면 → '2027'.
+    형제 중 연도가 가장 큰(최근) 것을 기준으로 삼고, 그 연도 부분만 target year 로 치환.
+    연도 패턴을 가진 형제 폴더가 없으면 기본값 'YYYY년' 으로 폴백.
+    """
+    best_title: Optional[str] = None
+    best_year = -1
+    for c in children:
+        if c.get("type") != "folder":
+            continue
+        title = (c.get("title") or "").strip()
+        m = _YEAR_RE.search(title)
+        if not m:
+            continue
+        y = int(m.group(0))
+        if y > best_year:
+            best_year = y
+            best_title = title
+    if best_title is None:
+        return f"{year}년"
+    m = _YEAR_RE.search(best_title)
+    return best_title[: m.start()] + str(year) + best_title[m.end():]
 
 
 def _quarter_from_month(month: int) -> int:
@@ -59,7 +90,9 @@ def get_or_create_year_folder(
 
     if not create_if_missing:
         return None
-    created = client.create_folder(space_id=space_id, title=title, parent_id=root_id)
+    # 신규 연도 폴더는 기존 형제 폴더 네이밍 규칙을 따른다 (예: '2027년_주간회의')
+    new_title = _derive_year_folder_title(children, year)
+    created = client.create_folder(space_id=space_id, title=new_title, parent_id=root_id)
     return str(created["id"])
 
 
@@ -200,17 +233,31 @@ def resolve_report_folders(
         y, q = now.year, _quarter_from_month(now.month)
 
     # 연도 폴더 없이 분기 폴더가 root 바로 아래 있는 flat 구조 우선 확인
-    # (이 경우 새 연도 폴더를 만들려다 Confluence 중복 제목 400 에러가 발생함)
+    # (이 경우 새 연도 폴더를 만들려다 Confluence 중복 제목 400 에러가 발생하거나,
+    #  새 분기 진입 시 연도 폴더가 한 단계 더 중첩 생성되는 문제가 발생함)
     try:
         root_children = client.get_folder_direct_children(root_id, limit=200)
-        flat_quarter_id = _find_folder_by_title(root_children, f"{q}분기")
-        if flat_quarter_id:
-            latest_id = get_latest_weekly_report_page_id(
-                client, flat_quarter_id, title_contains=team_name or "주간회의"
-            )
-            return (None, flat_quarter_id, latest_id)
     except Exception:
-        pass
+        root_children = None
+
+    if root_children is not None:
+        flat_quarter_id = _find_folder_by_title(root_children, f"{q}분기")
+        # 현재 분기 폴더가 아직 없어도, 다른 분기 폴더(N분기)가 root 바로 아래 있으면
+        # root 자체가 연도 폴더인 flat 구조로 판단한다. (예: '2026년_주간회의' 아래
+        # 1·2분기만 있는 상태에서 7월에 3분기로 진입하는 경우)
+        is_flat = flat_quarter_id is not None or any(
+            _find_folder_by_title(root_children, f"{n}분기") for n in (1, 2, 3, 4)
+        )
+        if is_flat:
+            quarter_id = flat_quarter_id or get_or_create_quarter_folder(
+                client, root_id, space_id, quarter=q, create_if_missing=create_if_missing
+            )
+            if quarter_id is None:
+                return (None, None, None)
+            latest_id = get_latest_weekly_report_page_id(
+                client, quarter_id, title_contains=team_name or "주간회의"
+            )
+            return (None, quarter_id, latest_id)
 
     year_id = get_or_create_year_folder(client, root_id, space_id, year=y, create_if_missing=create_if_missing)
     if year_id is None:

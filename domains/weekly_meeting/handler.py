@@ -36,7 +36,7 @@ from domains.weekly_meeting.cards import (
     build_weekly_meeting_menu_card,
 )
 from api.drive.permissions import check_sa_member, grant_sa_reader
-from config.settings import BOT_SA_EMAIL
+from config.settings import BOT_SA_EMAIL, VACATION_CALENDAR_ID
 from domains.weekly_meeting.schedule_lookup import lookup_member_vacation, lookup_weekly_meeting
 from firestore.team_config import (
     delete_team,
@@ -121,6 +121,17 @@ def _space_id(chat_event: dict[str, Any]) -> str:
 
 def _calendar_id(existing: dict[str, Any]) -> str:
     return str(existing.get("calendar_id") or "").strip()
+
+
+def _vacation_calendar_id(existing: dict[str, Any]) -> str:
+    """휴가/일정 캘린더 ID — 자동 페이지 생성(page_creator)과 동일한 폴백.
+
+    우선순위: vacation_calendar_id → 전역 VACATION_CALENDAR_ID.
+    calendar_id(회의 캘린더)로 폴백하면 휴가 이벤트가 없어 조회가 비게 된다.
+    """
+    return str(
+        existing.get("vacation_calendar_id") or VACATION_CALENDAR_ID or ""
+    ).strip()
 
 
 def _schedule_lines(events: list[dict[str, str]]) -> list[str]:
@@ -279,7 +290,7 @@ def handle_weekly_meeting_action(
         existing, team_name = _team_required(team_id)
         if not existing:
             return {"text": "팀을 선택해 주세요."}
-        calendar_id = _calendar_id(existing)
+        calendar_id = _vacation_calendar_id(existing)
         if not calendar_id:
             return build_schedule_result_card(
                 "팀원 휴가일정 조회",
