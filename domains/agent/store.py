@@ -26,6 +26,29 @@ STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_REJECTED = "rejected"
 STATUS_PENDING_REAPPROVAL = "pending_reapproval"
+# 승인 카드를 방치한 채 TTL 을 넘긴 계획. 사용자가 카드에 응답하지 않는 경우에 대한
+# 생명주기 전이가 없어서 pending 계획이 무기한 살아남았고, 한 달 뒤 새 요청을
+# 하이재킹하는 사고가 났다 — find_active_plan 이 만료 발견 시 이 상태로 정리한다.
+STATUS_EXPIRED = "expired"
+
+# 활성 계획 유효기간 — 승인 대기 계획이 새 발화의 수정(revision) 대상이 될 수 있는 시한.
+# 명료화 15분 만료와 같은 취지: 하루가 지나도록 승인하지 않은 계획은 버려진 것으로 본다.
+ACTIVE_PLAN_TTL_HOURS = 24
+
+
+def plan_expired(created_at_iso: str, *, hours: int = ACTIVE_PLAN_TTL_HOURS) -> bool:
+    """계획이 TTL 을 넘겼는지. 파싱 불가 시 만료로 단정하지 않음(보수적)."""
+    from datetime import datetime, timezone
+
+    if not (created_at_iso or "").strip():
+        return False
+    try:
+        created = datetime.fromisoformat(created_at_iso)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - created).total_seconds() > hours * 3600
+    except (ValueError, TypeError):
+        return False
 # 플래너가 되물어 답변을 기다리는 상태 — 후속 답변을 원 요청과 병합·재계획하기 위한 최소 상태.
 STATUS_CLARIFYING = "clarifying"
 STATUS_CLARIFY_CLOSED = "clarify_closed"
@@ -181,7 +204,11 @@ def find_active_plan(
     *,
     statuses: tuple[str, ...] = (STATUS_PENDING, STATUS_PENDING_REAPPROVAL),
 ) -> dict[str, Any] | None:
-    """user+space 기준 가장 최근 활성(pending) plan. 없으면 None."""
+    """user+space 기준 가장 최근 활성(pending) plan. 없으면 None.
+
+    TTL(24h)을 넘긴 pending 계획은 활성으로 치지 않고 expired 로 정리한다(lazy cleanup) —
+    방치된 계획이 좀비로 축적되어 이후 발화를 하이재킹하는 것을 원천 차단.
+    """
     if not (user_email or "").strip() or not (space_name or "").strip():
         return None
     allowed = set(statuses)
@@ -194,6 +221,10 @@ def find_active_plan(
         for doc in docs:
             data = doc.to_dict() or {}
             if data.get("status") not in allowed:
+                continue
+            if plan_expired(str(data.get("created_at") or "")):
+                set_status(doc.id, STATUS_EXPIRED)  # 실패해도 내부 로깅만 — 조회는 계속
+                logger.info("find_active_plan: 만료 계획 정리 plan_id=%s created_at=%s", doc.id, data.get("created_at"))
                 continue
             loaded = load_plan(doc.id)
             if loaded:

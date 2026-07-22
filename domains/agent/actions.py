@@ -495,6 +495,14 @@ def handle_agent_action(
         }
 
     if fn == "ag_approve":
+        # 승인은 승인 대기 상태에서만 — 이미 실행 중/완료된 계획의 카드를 다시 눌러
+        # 중복 실행되거나, 만료된 옛 카드로 좀비 계획이 부활하는 것을 막는다.
+        status = str(plan.get("status") or "")
+        if status not in (store.STATUS_PENDING, store.STATUS_PENDING_REAPPROVAL):
+            return {"text": "이 계획은 이미 처리됐거나 만료됐어요. 필요하시면 새로 요청해 주세요."}
+        if store.plan_expired(str(plan.get("created_at") or "")):
+            store.set_status(plan_id, store.STATUS_EXPIRED)
+            return {"text": "이 계획은 오래되어 만료됐어요. 다시 요청해 주시면 새로 세워드릴게요."}
         # 재승인(pending_reapproval) 또는 최초 승인(pending_approval) 모두 approved 로.
         store.set_status(plan_id, store.STATUS_APPROVED)
         space_name = plan.get("space_name") or _space_name(chat_event)
