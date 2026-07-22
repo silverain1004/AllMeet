@@ -128,15 +128,34 @@ def build_draft_card(
     )
 
     # Vertex 종합 초안 — 맨 위로. 사용자가 가장 먼저 보고 복사하는 결과물.
-    if draft:
-        body = _render_draft_body(draft)
-        if body:
-            sections.append(
-                {
-                    "header": "✏️ 종합 초안",
-                    "widgets": [{"textParagraph": {"text": body}}],
-                }
-            )
+    # 분석 실패 시 조용히 생략하지 않고 실패 사실을 명시 (silent degradation 방지 —
+    # 사용자가 "초안이 왜 없지?" 하고 원인을 알 수 없던 문제).
+    body = _render_draft_body(draft) if draft else ""
+    if body:
+        sections.append(
+            {
+                "header": "✏️ 종합 초안",
+                "widgets": [{"textParagraph": {"text": body}}],
+            }
+        )
+    else:
+        sections.append(
+            {
+                "header": "✏️ 종합 초안",
+                "widgets": [
+                    {
+                        "textParagraph": {
+                            "text": (
+                                "⚠️ 활동 데이터는 모았지만 <b>AI 요약 생성에 실패했어요</b> "
+                                "(데이터가 많아 분석이 중간에 잘렸을 수 있어요).<br>"
+                                "아래 원천 데이터를 참고하시고, 잠시 후 <b>주간보고초안</b>이라고 "
+                                "다시 요청해 주세요."
+                            )
+                        }
+                    }
+                ],
+            }
+        )
 
     # 원천 데이터 — 초안 근거. 접을 수 있는(collapsible) 섹션 하나로 묶어 아래로.
     # 각 서비스를 textParagraph 위젯 1개로 만들어 한 아코디언 안에 모음.
