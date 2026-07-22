@@ -103,25 +103,42 @@ def build_result_card(
     top3 = (experts or [])[:3]
     member_pool = member_pool or []
 
-    # email → AI 추천 reason map.
+    # email → AI 추천 reason / has_evidence 판정 map.
     reasons: dict[str, str] = {}
+    verdicts: dict[str, Any] = {}
     for e in (draft or {}).get("experts") or []:
         em = (e.get("email") or "").strip().lower()
         rs = (e.get("reason") or "").strip()
         if em and rs:
             reasons[em] = rs
+        if em:
+            verdicts[em] = e.get("has_evidence")
+
+    # AI 가 "근거 없음"으로 판정한 후보는 강등 — 점수 대신 참고 표시.
+    # 판정이 없으면(draft 실패·구버전 응답) 근거 있음으로 간주 (안전 폴백).
+    def _is_weak(entry: dict[str, Any]) -> bool:
+        return verdicts.get((entry.get("email") or "").strip().lower()) is False
+
+    # 이중 조건 제외 — AI "근거 없음" AND 점수가 1위의 30% 미만이면 아예 미노출.
+    top_score = float(top3[0].get("score") or 0.0) if top3 else 0.0
+    visible = [
+        e for e in top3
+        if not (_is_weak(e) and float(e.get("score") or 0.0) < top_score * 0.3)
+    ]
+    strong = [e for e in visible if not _is_weak(e)]
+    weak = [e for e in visible if _is_weak(e)]
 
     sections: list[dict[str, Any]] = []
 
-    # 1위 — 강조.
-    if top3:
+    # 1위 — 강조 (근거 있는 후보 중 최고점).
+    if strong:
         sections.append({
             "header": "🏆 가장 유력한 전문가",
-            "widgets": [{"textParagraph": {"text": _render_expert_block(top3[0], member_pool, rank=1, reasons=reasons)}}],
+            "widgets": [{"textParagraph": {"text": _render_expert_block(strong[0], member_pool, rank=1, reasons=reasons)}}],
         })
 
     # 2·3위 — 작게.
-    others = top3[1:]
+    others = strong[1:]
     if others:
         widgets: list[dict[str, Any]] = []
         for i, e in enumerate(others):
@@ -130,6 +147,18 @@ def build_result_card(
             widgets.append({"textParagraph": {"text": _render_expert_block(e, member_pool, rank=i + 2, reasons=reasons)}})
         sections.append({
             "header": "그 외 후보",
+            "widgets": widgets,
+        })
+
+    # 근거 약한 후보 — 점수 없이 참고용으로만.
+    if weak:
+        widgets = []
+        for i, e in enumerate(weak):
+            if i > 0:
+                widgets.append({"divider": {}})
+            widgets.append({"textParagraph": {"text": _render_expert_block(e, member_pool, rank=0, reasons=reasons, demoted=True)}})
+        sections.append({
+            "header": "참고 — 언급은 있으나 직접 근거 약함",
             "widgets": widgets,
         })
 
@@ -165,6 +194,7 @@ def _render_expert_block(
     member_pool: list[dict[str, Any]],
     rank: int,
     reasons: dict[str, str] | None = None,
+    demoted: bool = False,
 ) -> str:
     email = (entry.get("email") or "").strip()
     name = (entry.get("name") or "").strip()
@@ -211,6 +241,21 @@ def _render_expert_block(
             evidence_lines.append(f"&nbsp;&nbsp;◦ {safe_title}")
         if len(evidence_lines) >= 3:
             break
+
+    if demoted:
+        # 근거 약함 강등 — 점수·순위 없이 회색 참고 표시. 점수를 보여주면
+        # "근거 없음" 멘트와 숫자가 모순되어 신뢰를 깎는다.
+        lines = [
+            f"<font color=\"#888888\"><b>{display}</b> &lt;{safe_email}&gt;{team_label}</font>",
+        ]
+        if source_summary:
+            lines.append(f"<font color=\"#888888\">&nbsp;&nbsp;{source_summary}</font>")
+        if reasons:
+            rs = reasons.get(email.lower())
+            if rs:
+                lines.append(f"<font color=\"#888888\">&nbsp;&nbsp;💬 <i>{html.escape(rs)}</i></font>")
+        lines.extend(evidence_lines)
+        return "<br>".join(lines)
 
     rank_label = "" if rank == 1 else f"{rank}위 — "
     lines = [
