@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config.settings import ALLMEET_CHAT_MODEL, LOCATION, PROJECT_ID
+
+KST = timezone(timedelta(hours=9))
+_WEEKDAY_KO = ("월", "화", "수", "목", "금", "토", "일")
 
 
 def llm_extract_compose_state(
@@ -25,7 +29,11 @@ def llm_extract_compose_state(
     member_hint = ", ".join(
         f"{m.get('name')}<{m.get('email')}>" for m in members[:30] if m.get("name")
     )
+    # 기준일 없이 상대 날짜("오늘", "이번 주 금요일")를 주면 LLM이 임의 날짜를 환각한다.
+    now = datetime.now(KST)
+    today_hint = f"{now:%Y-%m-%d} ({_WEEKDAY_KO[now.weekday()]})"
     prompt = f"""사용자 메시지에서 회의 예약 정보를 JSON으로만 추출하세요.
+오늘은 {today_hint} 입니다 (Asia/Seoul 기준). "오늘"·"내일"·"이번 주 금요일" 같은 상대 날짜는 반드시 이 날짜를 기준으로 계산하세요.
 필드: meeting_date(YYYY-MM-DD), meeting_time(HH:MM), title, duration_minutes(정수), auto_meet(불리언), attendee_emails(배열).
 알 수 없으면 null. 팀원 후보: {member_hint}
 
@@ -46,6 +54,14 @@ def llm_extract_compose_state(
     for key in ("meeting_date", "meeting_time", "title"):
         if data.get(key):
             out[key] = str(data[key])
+    # 환각 방어 — LLM이 낸 날짜가 형식 오류거나 오늘(KST) 이전이면 폐기
+    if out.get("meeting_date"):
+        try:
+            parsed = datetime.strptime(out["meeting_date"], "%Y-%m-%d").date()
+            if parsed < now.date():
+                out.pop("meeting_date")
+        except ValueError:
+            out.pop("meeting_date")
     if data.get("duration_minutes"):
         try:
             out["duration_minutes"] = int(data["duration_minutes"])

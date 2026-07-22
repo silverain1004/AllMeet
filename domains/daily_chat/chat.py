@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config.settings import ALLMEET_CHAT_MODEL, LOCATION, PROJECT_ID
@@ -19,6 +20,15 @@ from . import conversation_store as conv
 logger = logging.getLogger(__name__)
 
 _model = None
+
+_KST = timezone(timedelta(hours=9))
+_WEEKDAY_KO = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def _today_kst_line() -> str:
+    """모델이 학습 데이터 시점을 현재로 착각하지 않도록 모든 프롬프트에 주입."""
+    now = datetime.now(_KST)
+    return f"오늘 날짜: {now:%Y-%m-%d} ({_WEEKDAY_KO[now.weekday()]}요일, Asia/Seoul 기준)"
 
 WHAT_I_CAN_DO_TEXT = (
     "제가 잘하는 업무는 이런 게 있어요.\n\n"
@@ -47,7 +57,8 @@ def _yes_no_classify(user_message: str, ctx_block: str, *, criteria: str, log_fa
         from vertexai.generative_models import GenerationConfig
 
         body = (
-            "역할: 분류기. 출력은 yes 또는 no 한 단어(영문 소문자)만 쓰세요.\n\n"
+            "역할: 분류기. 출력은 yes 또는 no 한 단어(영문 소문자)만 쓰세요.\n"
+            f"{_today_kst_line()}\n\n"
             f"{criteria}\n\n"
         )
         body += f"{ctx}\n\n" if ctx else "(이전 대화 없음)\n\n"
@@ -95,7 +106,8 @@ def _answer_with_google_search(user_message: str, ctx_block: str = "") -> str:
         client = genai.Client()
         intro = (
             "당신은 All-Meet 업무 에이전트입니다. 아래 질문에 대해 검색 결과를 바탕으로 "
-            "한국어로 간결하고 정확하게 답하세요. 수치·시점은 검색에 나온 내용을 우선하세요.\n\n"
+            "한국어로 간결하고 정확하게 답하세요. 수치·시점은 검색에 나온 내용을 우선하세요.\n"
+            f"{_today_kst_line()}\n\n"
         )
         ctx = (ctx_block or "").strip()
         if ctx:
@@ -235,6 +247,7 @@ def reply_daily_chat(
             recent_hint = ""
 
         prompt = f"""당신은 기업용 업무 에이전트 'All-Meet'입니다.
+                {_today_kst_line()}
                 아래 사용자 메시지에 대해 친근하고 자연스러운 한국어로 답하세요.
                 업무 도구를 쓰라고 강요하지 말고, 일상 대화·질문에는 직접 답변하세요.
                 응답은 2~6문장 정도로 적당히 짧게 유지하고, 의미 단위마다 빈 줄로 단락을 나누어 읽기 쉽게 쓰세요.
