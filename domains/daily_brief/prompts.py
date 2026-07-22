@@ -119,6 +119,8 @@ _BRIEFING_SYSTEM = (
     "source: gmail / drive / confluence / calendar 중 하나.\n\n"
     "규칙:\n"
     "- 본인 발신 메일은 본인 행위이므로 상대방 처리 필요 아님 (response_required=false).\n"
+    "- 오늘 일정(calendar)은 사용자가 직접 캘린더에 둔 것이므로, 반복 일정이나 "
+    "스크립트/자동 생성 제목(예: 'APP SCRIPT', '일일점검')이어도 noise로 분류하지 마세요 — 최소 fyi로 포함.\n"
     "- noise로 분류된 항목은 reason을 빈 문자열로 두세요.\n"
     "- 데이터에 없는 정보는 절대 추측하지 마세요.\n"
     "- summary는 오늘 핵심 할일을 한 줄로 (예: '긴급 답장 2건, 검토 3건, 오전 스탠드업').\n"
