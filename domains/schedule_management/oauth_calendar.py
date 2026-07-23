@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -14,6 +16,23 @@ from firestore.oauth_tokens import get_token
 logger = logging.getLogger(__name__)
 
 USER_CAL_PREFIX = "user:"
+
+# Google access_token 은 1시간 유효한데 예전에는 카드 렌더마다 refresh POST 를 새로 쳤다.
+# 만료 5분 전까지 재사용해 클릭당 왕복 2회를 없앤다.
+_ACCESS_TOKEN_TTL_SEC = 3300
+_access_token_cache: dict[str, tuple[float, str]] = {}
+_access_token_lock = threading.Lock()
+
+
+def clear_access_token_cache(user_email: str | None = None) -> None:
+    """access_token 캐시 무효화. user_email 이 없으면 전체."""
+    with _access_token_lock:
+        if user_email:
+            prefix = f"{user_email}\x00"
+            for key in [k for k in _access_token_cache if k.startswith(prefix)]:
+                _access_token_cache.pop(key, None)
+        else:
+            _access_token_cache.clear()
 
 
 def encode_user_calendar_id(user_email: str, calendar_id: str) -> str:
@@ -47,6 +66,14 @@ def get_user_access_token(user_email: str) -> str | None:
     refresh = str(doc.get("refresh_token") or "").strip()
     if not refresh or str(doc.get("status") or "") != "linked":
         return None
+    # 캐시 키에 refresh_token 을 포함 — 재동의로 새 refresh_token 이 발급되면 옛 access_token
+    # 은 서버에서 폐기되므로, email 만으로 캐싱하면 죽은 토큰으로 401 이 난다.
+    cache_key = f"{user_email}\x00{refresh}"
+    now = time.monotonic()
+    with _access_token_lock:
+        cached = _access_token_cache.get(cache_key)
+        if cached and (now - cached[0]) < _ACCESS_TOKEN_TTL_SEC:
+            return cached[1]
     if not (OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET):
         logger.warning("OAuth client not configured")
         return None
@@ -68,7 +95,17 @@ def get_user_access_token(user_email: str) -> str | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         token = data.get("access_token")
-        return str(token) if token else None
+        if not token:
+            return None
+        expires_in = int(data.get("expires_in") or 3600)
+        ttl = max(60, min(_ACCESS_TOKEN_TTL_SEC, expires_in - 300))
+        with _access_token_lock:
+            # 캐시 만료 시각을 TTL 기준으로 맞추려 저장 시각을 뒤로 당긴다.
+            _access_token_cache[cache_key] = (
+                time.monotonic() - (_ACCESS_TOKEN_TTL_SEC - ttl),
+                str(token),
+            )
+        return str(token)
     except Exception as e:
         logger.warning("refresh token failed for %s: %s", user_email, e)
         return None

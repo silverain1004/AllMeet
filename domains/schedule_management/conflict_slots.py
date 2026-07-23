@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -14,7 +15,21 @@ from domains.schedule_management.compose_state import (
     apply_duration_mode,
     resolve_end_time,
 )
-from domains.schedule_management.rooms import _busy_emails_from_freebusy, recommend_rooms
+from domains.schedule_management.rooms import (
+    _attendee_count_for_state,
+    _busy_emails_from_freebusy,
+    _sort_rooms_for_recommendation,
+    ordered_rooms_for_state,
+)
+from domains.schedule_management.room_calendar_store import get_room_calendar_config
+from domains.schedule_management.rooms_group import (
+    busy_resource_ids_from_group_bookings,
+    list_group_room_bookings,
+)
+from domains.schedule_management.rooms_store import get_rooms
+
+# Google freeBusy 는 요청당 items 50개 제한.
+_FREEBUSY_ITEM_LIMIT = 50
 
 
 @dataclass
@@ -264,33 +279,43 @@ def _conflicts_for_slot(
             time_max_iso=end_iso,
         )
 
-    for email in busy_emails:
-        label = _attendee_label(email, state)
-        ev_result = list_events(
+    # 바쁜 참석자별 일정 제목 조회 — 직렬로 돌면 참석자 수에 비례해 느려져 병렬로 친다.
+    busy_list = sorted(busy_emails)
+    if not busy_list:
+        return conflicts
+
+    def _detail(email: str) -> list[dict[str, Any]]:
+        result = list_events(
             calendar_id=email,
             time_min=start_iso,
             time_max=end_iso,
             access_token=access_token,
         )
-        if ev_result.ok and ev_result.events:
-            found = _conflicts_from_events(
-                ev_result.events,
-                start_iso=start_iso,
-                end_iso=end_iso,
-                kind="attendee",
-                label=label,
-            )
-            if found:
-                conflicts.extend(found)
-            else:
-                conflicts.append(
-                    _light_busy_conflict(
-                        kind="attendee",
-                        label=label,
-                        start_iso=start_iso,
-                        end_iso=end_iso,
-                    )
-                )
+        return list(result.events or []) if result.ok else []
+
+    events_by_email: dict[str, list[dict[str, Any]]] = {}
+    if len(busy_list) == 1:
+        events_by_email[busy_list[0]] = _detail(busy_list[0])
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(busy_list))) as executor:
+            futures = {email: executor.submit(_detail, email) for email in busy_list}
+            for email, future in futures.items():
+                try:
+                    events_by_email[email] = future.result()
+                except Exception:
+                    events_by_email[email] = []
+
+    for email in busy_list:
+        label = _attendee_label(email, state)
+        found = _conflicts_from_events(
+            events_by_email.get(email) or [],
+            start_iso=start_iso,
+            end_iso=end_iso,
+            kind="attendee",
+            label=label,
+        )
+        if found:
+            conflicts.extend(found)
         else:
             conflicts.append(
                 _light_busy_conflict(
@@ -323,33 +348,46 @@ def _candidate_start_times(
     return candidates
 
 
-def _slot_has_free_room(
-    state: dict[str, Any],
+def _busy_ranges(spans: list[dict[str, str]] | None) -> list[tuple[datetime, datetime]]:
+    out: list[tuple[datetime, datetime]] = []
+    for span in spans or []:
+        try:
+            s = datetime.fromisoformat(
+                str(span.get("start") or "").replace("Z", "+00:00")
+            ).astimezone(KST)
+            e = datetime.fromisoformat(
+                str(span.get("end") or "").replace("Z", "+00:00")
+            ).astimezone(KST)
+        except ValueError:
+            continue
+        out.append((s, e))
+    return out
+
+
+def _ranges_overlap(ranges: list[tuple[datetime, datetime]], t0: datetime, t1: datetime) -> bool:
+    return any(s < t1 and e > t0 for s, e in ranges)
+
+
+def _freebusy_chunked(
+    calendar_ids: list[str],
     *,
-    date: str,
-    time_str: str,
-    end_time: str,
-    access_token: str,
-) -> tuple[int, str]:
-    probe = dict(state)
-    probe["meeting_date"] = date
-    probe["meeting_time"] = time_str
-    probe["meeting_end_time"] = end_time
-    if not str(probe.get("duration_mode") or "").strip():
-        probe["duration_mode"] = "1h"
-    apply_duration_mode(probe)
-    rooms = recommend_rooms(
-        probe,
-        max_n=10,
-        duration_minutes=int(probe.get("duration_minutes") or 60),
-        access_token=access_token,
-    )
-    free_rooms = [r for r in rooms if str(r.get("availability") or "") == "free"]
-    if not free_rooms:
-        return 0, ""
-    top = free_rooms[0]
-    name = str(top.get("display_name") or top.get("name") or "")
-    return len(free_rooms), name
+    time_min: str,
+    time_max: str,
+    access_token: str | None,
+) -> dict[str, list[dict[str, str]]]:
+    """freeBusy items 50개 제한을 넘기면 나눠 조회 후 병합."""
+    busy: dict[str, list[dict[str, str]]] = {}
+    for i in range(0, len(calendar_ids), _FREEBUSY_ITEM_LIMIT):
+        chunk = calendar_ids[i : i + _FREEBUSY_ITEM_LIMIT]
+        result = freebusy_query(
+            calendar_ids=chunk,
+            time_min=time_min,
+            time_max=time_max,
+            access_token=access_token,
+        )
+        if result.ok:
+            busy.update(result.busy)
+    return busy
 
 
 def suggest_alternative_slots(
@@ -360,7 +398,14 @@ def suggest_alternative_slots(
     user_name: str,
     api_calendar_id: str,
     max_n: int = 3,
+    rooms: list[dict[str, Any]] | None = None,
 ) -> list[SlotSuggestion]:
+    """대안 시간 후보를 하루치 조회 1회분으로 판정.
+
+    예전에는 후보 시각마다 `_conflicts_for_slot` + 회의실 freebusy 를 직렬로 쳐서
+    후보 하나당 2~4회 왕복, 최악엔 수십 회가 순차로 쌓였다. 업무시간 전체를 한 번에
+    받아 슬롯 판정은 메모리에서 하도록 바꿔 API 호출을 상수(최대 3회)로 고정한다.
+    """
     bounds = _slot_bounds(state)
     if not bounds or not access_token:
         return []
@@ -370,43 +415,110 @@ def suggest_alternative_slots(
         work["duration_mode"] = "1h"
     apply_duration_mode(work)
     duration = int(work.get("duration_minutes") or 60)
-    suggestions: list[SlotSuggestion] = []
-    for time_str in _candidate_start_times(date, requested_time, duration):
-        if time_str == requested_time:
-            continue
+
+    candidates = [t for t in _candidate_start_times(date, requested_time, duration) if t != requested_time]
+    if not candidates:
+        return []
+    try:
+        day_start_iso = to_kst_iso(date, BUSINESS_HOUR_START)
+        day_end_iso = to_kst_iso(date, BUSINESS_HOUR_END)
+    except ValueError:
+        return []
+
+    room_list = rooms if rooms is not None else get_rooms()
+    ordered = ordered_rooms_for_state(work, room_list)
+    resource_ids = [
+        str(r.get("calendar_resource_id") or "").strip()
+        for r in ordered
+        if str(r.get("calendar_resource_id") or "").strip()
+    ]
+    booker_cal = api_calendar_id or "primary"
+    people_ids = [booker_cal]
+    for email in _attendee_emails(state):
+        if email.lower() != booker_cal.lower() and email not in people_ids:
+            people_ids.append(email)
+    group_enabled = bool(get_room_calendar_config().get("group_calendar_id"))
+
+    def _fetch_people() -> dict[str, list[dict[str, str]]]:
+        return _freebusy_chunked(
+            people_ids, time_min=day_start_iso, time_max=day_end_iso, access_token=access_token
+        )
+
+    def _fetch_rooms() -> dict[str, list[dict[str, str]]]:
+        if not resource_ids:
+            return {}
+        return _freebusy_chunked(
+            resource_ids, time_min=day_start_iso, time_max=day_end_iso, access_token=access_token
+        )
+
+    def _fetch_group() -> list[dict[str, Any]]:
+        if not group_enabled:
+            return []
+        return list_group_room_bookings(
+            time_min=day_start_iso, time_max=day_end_iso, access_token=access_token
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_people = executor.submit(_fetch_people)
+        f_rooms = executor.submit(_fetch_rooms)
+        f_group = executor.submit(_fetch_group)
         try:
-            start_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M")
-            end_time = (start_dt + timedelta(minutes=duration)).strftime("%H:%M")
-            start_iso = to_kst_iso(date, time_str)
-            end_iso = to_kst_iso(date, end_time)
+            people_busy = f_people.result()
+        except Exception:
+            return []
+        try:
+            room_busy = f_rooms.result()
+        except Exception:
+            room_busy = {}
+        try:
+            group_bookings = f_group.result()
+        except Exception:
+            group_bookings = []
+
+    people_ranges = {cid: _busy_ranges(spans) for cid, spans in people_busy.items()}
+    room_ranges = {rid: _busy_ranges(spans) for rid, spans in room_busy.items()}
+    attendee_count = _attendee_count_for_state(state)
+
+    suggestions: list[SlotSuggestion] = []
+    for time_str in candidates:
+        try:
+            t0 = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=KST)
         except ValueError:
             continue
-        if _conflicts_for_slot(
-            state,
-            start_iso=start_iso,
-            end_iso=end_iso,
-            access_token=access_token,
-            user_email=user_email,
-            user_name=user_name,
-            api_calendar_id=api_calendar_id,
-        ):
+        t1 = t0 + timedelta(minutes=duration)
+        end_time = t1.strftime("%H:%M")
+        if any(_ranges_overlap(people_ranges.get(cid) or [], t0, t1) for cid in people_ids):
             continue
-        free_count, top_name = _slot_has_free_room(
-            state,
-            date=date,
-            time_str=time_str,
-            end_time=end_time,
-            access_token=access_token,
+
+        group_busy = busy_resource_ids_from_group_bookings(
+            group_bookings,
+            ordered,
+            time_min_iso=t0.isoformat(),
+            time_max_iso=t1.isoformat(),
         )
-        if free_count <= 0:
+        annotated: list[dict[str, Any]] = []
+        for room in ordered:
+            row = dict(room)
+            rid = str(room.get("calendar_resource_id") or "").strip()
+            if not rid:
+                row["availability"] = "unknown"
+            elif _ranges_overlap(room_ranges.get(rid) or [], t0, t1) or rid in group_busy:
+                row["availability"] = "busy"
+            else:
+                row["availability"] = "free"
+            annotated.append(row)
+        _sort_rooms_for_recommendation(annotated, attendee_count=attendee_count)
+        free_rooms = [r for r in annotated if str(r.get("availability") or "") == "free"]
+        if not free_rooms:
             continue
+        top = free_rooms[0]
         suggestions.append(
             SlotSuggestion(
                 meeting_date=date,
                 meeting_time=time_str,
                 meeting_end_time=end_time,
-                free_room_count=free_count,
-                top_room_name=top_name,
+                free_room_count=len(free_rooms),
+                top_room_name=str(top.get("display_name") or top.get("name") or ""),
             )
         )
         if len(suggestions) >= max_n:
@@ -423,6 +535,7 @@ def check_schedule_conflicts(
     api_calendar_id: str,
     snapshot: ComposeCalendarSnapshot | None = None,
     mode: str = "full",
+    rooms: list[dict[str, Any]] | None = None,
 ) -> ConflictCheckResult:
     if not access_token or state.get("ignore_conflict"):
         return ConflictCheckResult()
@@ -453,5 +566,6 @@ def check_schedule_conflicts(
             user_email=user_email,
             user_name=user_name,
             api_calendar_id=api_calendar_id,
+            rooms=rooms,
         )
     return result

@@ -431,15 +431,18 @@ def get_group_booking_summary(
     snapshot: ComposeCalendarSnapshot | None = None,  # noqa: F821
     rooms: list[dict[str, Any]] | None = None,
 ) -> str:
-    """선택 일시 기준 군산 집계 캘린더 예약 요약."""
-    if not get_room_calendar_config().get("group_calendar_id"):
-        return ""
+    """선택 일시 기준 회의실 예약 요약 (집계 캘린더 + 리소스 캘린더 직접 예약)."""
+    group_enabled = bool(get_room_calendar_config().get("group_calendar_id"))
     room_list = rooms if rooms is not None else get_rooms()
+    room_busy: dict[str, list[dict[str, str]]] = {}
     if snapshot:
         bookings = snapshot.group_bookings
+        room_busy = snapshot.room_busy
         start_iso = snapshot.start_iso
         end_iso = snapshot.end_iso
     else:
+        if not group_enabled:
+            return ""
         date = str(state.get("meeting_date") or "").strip()
         time_str = str(state.get("meeting_time") or "").strip()
         if not date or not time_str:
@@ -458,11 +461,12 @@ def get_group_booking_summary(
             time_max=end_iso,
             access_token=access_token,
         )
-    if not bookings:
+    if not bookings and not room_busy:
         return ""
     return format_group_booking_summary(
         bookings,
         room_list,
         time_min_iso=start_iso,
         time_max_iso=end_iso,
+        room_busy=room_busy,
     )

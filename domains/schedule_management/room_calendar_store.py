@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import os
+import time
 from typing import Any
 
 from domains.schedule_management.gunsan_rooms import GUNSAN_ROOM_CATALOG
@@ -10,6 +12,10 @@ from firestore.writes import get_client
 
 _CONFIG_COLLECTION = "config"
 _ROOM_CALENDAR_DOC = "room_calendar"
+
+# 카드 1회 렌더에서 3회 이상 조회된다(스냅샷 2회 + 그룹 요약 1회). 설정 변경은 드물다.
+_CONFIG_TTL_SEC = 120
+_config_cache: tuple[float, dict[str, Any]] | None = None
 
 _GUNSAN_GROUP_CALENDAR_ID = (
     "c_b9eaaa762147e2838192050f2ae6ff03e9e0f38e242cc4394e963ee81212e454"
@@ -57,15 +63,28 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def clear_room_calendar_config_cache() -> None:
+    global _config_cache
+    _config_cache = None
+
+
 def get_room_calendar_config() -> dict[str, Any]:
+    global _config_cache
+    now = time.monotonic()
+    if _config_cache and (now - _config_cache[0]) < _CONFIG_TTL_SEC:
+        return copy.deepcopy(_config_cache[1])
     db = get_client()
     snap = db.collection(_CONFIG_COLLECTION).document(_ROOM_CALENDAR_DOC).get()
     if not snap.exists:
-        return _normalize(_DEFAULT)
-    return _normalize(snap.to_dict() or {})
+        config = _normalize(_DEFAULT)
+    else:
+        config = _normalize(snap.to_dict() or {})
+    _config_cache = (now, copy.deepcopy(config))
+    return config
 
 
 def update_room_calendar_config(**fields: Any) -> dict[str, Any]:
+    clear_room_calendar_config_cache()
     current = get_room_calendar_config()
     for key, val in fields.items():
         if key not in _DEFAULT:
@@ -77,4 +96,5 @@ def update_room_calendar_config(**fields: Any) -> dict[str, Any]:
     normalized = _normalize(current)
     db = get_client()
     db.collection(_CONFIG_COLLECTION).document(_ROOM_CALENDAR_DOC).set(normalized, merge=True)
+    clear_room_calendar_config_cache()
     return normalized

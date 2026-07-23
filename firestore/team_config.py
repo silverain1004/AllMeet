@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -10,6 +11,9 @@ from .writes import get_client
 
 _CONFIG_COLLECTION = "config"
 _TEAM_LIST_DOC = "team_list"
+
+_ALL_MEMBERS_TTL_SEC = 120
+_all_members_cache: tuple[float, list[dict[str, Any]]] | None = None
 GLOBAL_SETTING_FIELDS = {
     "user_email",
     "api_token",
@@ -441,6 +445,7 @@ def upsert_team_config(
     _upsert_team_list(team_id, team_name)
     if settings_updates:
         upsert_team_settings(team_id, team_name, settings_updates)
+    clear_all_members_cache()
     return ref.get().to_dict() or {}
 
 
@@ -477,6 +482,7 @@ def delete_team(team_id: str) -> bool:
         return False
     ref.delete()
     remove_team_from_list(team_id)
+    clear_all_members_cache()
     return True
 
 
@@ -531,8 +537,21 @@ def update_team_shared_drive_ids(
     )
 
 
+def clear_all_members_cache() -> None:
+    global _all_members_cache
+    _all_members_cache = None
+
+
 def get_all_members() -> list[dict[str, Any]]:
-    """모든 팀의 team_members를 평탄화해 반환 (이름/이메일/팀 메타)."""
+    """모든 팀의 team_members를 평탄화해 반환 (이름/이메일/팀 메타). (120초 TTL 캐시)
+
+    참석자 추가 등 카드 액션마다 호출되는데 원본은 `config` 컬렉션 전체 stream 이라
+    비용이 크다. 멤버 변경 시 `clear_all_members_cache()` 로 무효화한다.
+    """
+    global _all_members_cache
+    now = time.monotonic()
+    if _all_members_cache and (now - _all_members_cache[0]) < _ALL_MEMBERS_TTL_SEC:
+        return [dict(m) for m in _all_members_cache[1]]
     db = get_client()
     out: list[dict[str, Any]] = []
     for doc in db.collection(_CONFIG_COLLECTION).stream():
@@ -562,7 +581,8 @@ def get_all_members() -> list[dict[str, Any]]:
                     "team_name": team_name,
                 }
             )
-    return out
+    _all_members_cache = (now, [dict(m) for m in out])
+    return [dict(m) for m in out]
 
 
 # ---------------------------------------------------------------------------

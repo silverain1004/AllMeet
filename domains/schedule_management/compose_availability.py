@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -19,7 +20,30 @@ from domains.schedule_management.rooms_group import list_group_room_bookings
 
 FREE_BUSY_ROOM_CANDIDATE_LIMIT = 8
 _SNAPSHOT_TTL_SEC = 45
-_snapshot_cache: dict[tuple[Any, ...], tuple[float, ComposeCalendarSnapshot]] = {}
+
+# 조각별 캐시 — 예전에는 스냅샷 전체를 (시간대 + 참석자 + 회의실) 한 키로 묶어서,
+# 참석자를 한 명 추가하면 참석자와 무관한 회의실·그룹 예약까지 전부 재조회됐다.
+# 참석자 목록에 의존하는 조각만 따로 떼어 캐시 miss 범위를 좁힌다.
+_part_cache: dict[str, dict[tuple[Any, ...], tuple[float, Any]]] = {
+    "room_busy": {},
+    "people_busy": {},
+    "group_bookings": {},
+    "booker_events": {},
+}
+_part_lock = threading.Lock()
+
+
+def _part_get(part: str, key: tuple[Any, ...]) -> tuple[bool, Any]:
+    with _part_lock:
+        cached = _part_cache[part].get(key)
+    if cached and (time.monotonic() - cached[0]) < _SNAPSHOT_TTL_SEC:
+        return True, cached[1]
+    return False, None
+
+
+def _part_put(part: str, key: tuple[Any, ...], value: Any) -> None:
+    with _part_lock:
+        _part_cache[part][key] = (time.monotonic(), value)
 
 
 @dataclass
@@ -79,23 +103,6 @@ def _people_emails(state: dict[str, Any], booker_email: str) -> list[str]:
     return emails
 
 
-def _cache_key(
-    *,
-    start_iso: str,
-    end_iso: str,
-    people_emails: list[str],
-    resource_ids: list[str],
-    fetch_booker_events: bool,
-) -> tuple[Any, ...]:
-    return (
-        start_iso,
-        end_iso,
-        tuple(sorted(people_emails)),
-        tuple(sorted(resource_ids)),
-        fetch_booker_events,
-    )
-
-
 def fetch_compose_snapshot(
     state: dict[str, Any],
     *,
@@ -121,17 +128,11 @@ def fetch_compose_snapshot(
     ]
     people_emails = _people_emails(state, booker_email)
 
-    cache_key = _cache_key(
-        start_iso=start_iso,
-        end_iso=end_iso,
-        people_emails=people_emails,
-        resource_ids=resource_ids,
-        fetch_booker_events=fetch_booker_events,
-    )
-    if use_cache:
-        cached = _snapshot_cache.get(cache_key)
-        if cached and (time.monotonic() - cached[0]) < _SNAPSHOT_TTL_SEC:
-            return cached[1]
+    group_enabled = bool(get_room_calendar_config().get("group_calendar_id"))
+    room_key = (start_iso, end_iso, tuple(sorted(resource_ids)))
+    people_key = (start_iso, end_iso, tuple(sorted(e.lower() for e in people_emails)))
+    group_key = (start_iso, end_iso)
+    booker_key = (start_iso, end_iso, api_calendar_id or "primary")
 
     room_busy: dict[str, list[dict[str, str]]] = {}
     attendee_busy_emails: set[str] = set()
@@ -168,7 +169,7 @@ def fetch_compose_snapshot(
         )
 
     def _fetch_group_bookings() -> list[dict[str, Any]]:
-        if not get_room_calendar_config().get("group_calendar_id"):
+        if not group_enabled:
             return []
         return list_group_room_bookings(
             time_min=start_iso,
@@ -188,32 +189,48 @@ def fetch_compose_snapshot(
         )
         return list(result.events or []) if result.ok else []
 
-    futures: dict[str, Any] = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        if resource_ids:
-            futures["room_busy"] = executor.submit(_fetch_room_busy)
-        if people_emails:
-            futures["people_busy"] = executor.submit(_fetch_people_busy)
-        if get_room_calendar_config().get("group_calendar_id"):
-            futures["group_bookings"] = executor.submit(_fetch_group_bookings)
-        if fetch_booker_events:
-            futures["booker_events"] = executor.submit(_fetch_booker_events)
+    # (조각 이름, 필요 여부, 캐시 키, 조회 함수)
+    parts: list[tuple[str, bool, tuple[Any, ...], Any]] = [
+        ("room_busy", bool(resource_ids), room_key, _fetch_room_busy),
+        ("people_busy", bool(people_emails), people_key, _fetch_people_busy),
+        ("group_bookings", group_enabled, group_key, _fetch_group_bookings),
+        ("booker_events", fetch_booker_events, booker_key, _fetch_booker_events),
+    ]
 
-        for name, future in futures.items():
-            try:
-                value = future.result()
-            except Exception:
-                value = None
-            if name == "room_busy" and isinstance(value, dict):
-                room_busy = value
-            elif name == "people_busy" and isinstance(value, set):
-                attendee_busy_emails = value
-            elif name == "group_bookings" and isinstance(value, list):
-                group_bookings = value
-            elif name == "booker_events" and isinstance(value, list):
-                booker_events = value
+    resolved: dict[str, Any] = {}
+    pending: list[tuple[str, tuple[Any, ...], Any]] = []
+    for name, needed, key, fn in parts:
+        if not needed:
+            continue
+        if use_cache:
+            hit, value = _part_get(name, key)
+            if hit:
+                resolved[name] = value
+                continue
+        pending.append((name, key, fn))
 
-    snapshot = ComposeCalendarSnapshot(
+    if pending:
+        with ThreadPoolExecutor(max_workers=len(pending)) as executor:
+            futures = {name: (key, executor.submit(fn)) for name, key, fn in pending}
+            for name, (key, future) in futures.items():
+                try:
+                    value = future.result()
+                except Exception:
+                    continue
+                resolved[name] = value
+                if use_cache:
+                    _part_put(name, key, value)
+
+    if isinstance(resolved.get("room_busy"), dict):
+        room_busy = resolved["room_busy"]
+    if isinstance(resolved.get("people_busy"), set):
+        attendee_busy_emails = resolved["people_busy"]
+    if isinstance(resolved.get("group_bookings"), list):
+        group_bookings = resolved["group_bookings"]
+    if isinstance(resolved.get("booker_events"), list):
+        booker_events = resolved["booker_events"]
+
+    return ComposeCalendarSnapshot(
         start_iso=start_iso,
         end_iso=end_iso,
         room_busy=room_busy,
@@ -221,10 +238,9 @@ def fetch_compose_snapshot(
         group_bookings=group_bookings,
         booker_events=booker_events,
     )
-    if use_cache:
-        _snapshot_cache[cache_key] = (time.monotonic(), snapshot)
-    return snapshot
 
 
 def clear_snapshot_cache() -> None:
-    _snapshot_cache.clear()
+    with _part_lock:
+        for bucket in _part_cache.values():
+            bucket.clear()

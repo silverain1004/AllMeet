@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -63,6 +64,9 @@ from firestore.team_config import (
     update_team_calendar_id,
 )
 
+_CALENDAR_OPTIONS_TTL_SEC = 300
+_CALENDAR_OPTIONS_CACHE: dict[tuple[str, bool], tuple[float, list[dict[str, str]]]] = {}
+
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 _SUGGESTION_RE = re.compile(r"^(.+?)\s*\(([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\)\s*$")
 
@@ -97,10 +101,34 @@ def _oauth_url(chat_event: dict[str, Any] | None) -> str:
     )
 
 
-def _calendar_options(chat_event: dict[str, Any] | None) -> list[dict[str, str]]:
-    """OAuth 연결 시 사용자 캘린더만, 미연결 시 팀 캘린더 폴백."""
+def _calendar_options(
+    chat_event: dict[str, Any] | None,
+    *,
+    linked: bool | None = None,
+) -> list[dict[str, str]]:
+    """OAuth 연결 시 사용자 캘린더만, 미연결 시 팀 캘린더 폴백. (렌더당 반복 호출 → TTL 캐시)"""
     email = _user_context(chat_event).get("email", "")
-    if email and is_oauth_linked(email):
+    is_linked = is_oauth_linked(email) if linked is None else linked
+    cache_key = (email, bool(is_linked))
+    now = time.monotonic()
+    cached = _CALENDAR_OPTIONS_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _CALENDAR_OPTIONS_TTL_SEC:
+        return [dict(o) for o in cached[1]]
+    options = _build_calendar_options(email=email, linked=bool(is_linked))
+    _CALENDAR_OPTIONS_CACHE[cache_key] = (now, [dict(o) for o in options])
+    return [dict(o) for o in options]
+
+
+def clear_calendar_options_cache() -> None:
+    _CALENDAR_OPTIONS_CACHE.clear()
+
+
+def _build_calendar_options(
+    *,
+    email: str,
+    linked: bool,
+) -> list[dict[str, str]]:
+    if email and linked:
         return list_user_calendars(email)
 
     options: list[dict[str, str]] = [{"id": "primary", "label": "내 캘린더 (primary, OAuth 필요)"}]
@@ -220,10 +248,15 @@ def _is_room_busy(
     return False
 
 
-def _ensure_calendar_id(state: dict[str, Any], chat_event: dict[str, Any] | None) -> None:
+def _ensure_calendar_id(
+    state: dict[str, Any],
+    chat_event: dict[str, Any] | None,
+    *,
+    linked: bool | None = None,
+) -> None:
     if state.get("calendar_id"):
         return
-    opts = _calendar_options(chat_event)
+    opts = _calendar_options(chat_event, linked=linked)
     if opts:
         state["calendar_id"] = opts[0]["id"]
 
@@ -244,11 +277,12 @@ def _render_compose(
 ) -> dict[str, Any]:
     ctx = _user_context(chat_event)
     email = ctx.get("email", "")
-    _ensure_calendar_id(state, chat_event)
+    linked = bool(email and is_oauth_linked(email))
+    _ensure_calendar_id(state, chat_event, linked=linked)
     _ensure_default_duration(state)
     apply_duration_mode(state)
     api_cal, token = _resolve_calendar_auth(str(state.get("calendar_id") or ""), chat_event)
-    access = token or (get_user_access_token(email) if email and is_oauth_linked(email) else None)
+    access = token or (get_user_access_token(email) if linked else None)
     step = str(state.get("compose_step") or "quick")
     conflict_mode = "light" if step == "quick" else "full"
     preview_ready = ready_for_quick_room_preview(state)
@@ -277,6 +311,7 @@ def _render_compose(
                 api_calendar_id=api_cal,
                 snapshot=snapshot,
                 mode=conflict_mode,
+                rooms=room_list,
             )
         rooms = recommend_rooms(
             state,
@@ -292,10 +327,9 @@ def _render_compose(
             snapshot=snapshot,
             rooms=room_list,
         )
-    linked = bool(email and is_oauth_linked(email))
     return build_compose_card(
         state,
-        calendar_options=_calendar_options(chat_event),
+        calendar_options=_calendar_options(chat_event, linked=linked),
         recommended_rooms=rooms,
         members=members if members is not None else get_all_members(),
         pending_candidates=pending_candidates,
