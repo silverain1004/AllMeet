@@ -361,6 +361,7 @@ def _booking_invite_params(
     meet_link: str,
     html_link: str,
     booker_email: str,
+    resource_email: str = "",
 ) -> dict[str, str]:
     return {
         "last_event_id": event_id,
@@ -374,6 +375,7 @@ def _booking_invite_params(
         "attendees_pipe": serialize_attendees(state.get("attendees") or []),
         "attendee_emails": ",".join(attendee_emails),
         "booker_email": booker_email,
+        "resource_email": resource_email,
         "meet_url": meet_link,
         "html_link": html_link,
     }
@@ -544,15 +546,43 @@ def handle_schedule_management_action(
             e.strip() for e in (parameters.get("attendee_emails") or "").split(",") if e.strip()
         ]
         booker_email = str(parameters.get("booker_email") or user_context.get("email") or "")
+        resource_email = str(parameters.get("resource_email") or "").strip()
+        # resource_email이 없으면(구버전 카드) patch_event가 기존 이벤트의 리소스를 보존한다.
+        resource_list = [resource_email] if resource_email else None
+        # Calendar에는 초대 재발송 API가 없고, 내용 변경이 없는 patch는 메일이 발송되지
+        # 않을 수 있다. 참석자를 잠시 제거했다가 재추가해 초대 메일 발송을 보장한다.
+        booker_lower = booker_email.strip().lower()
+        others = [e for e in attendee_emails if e.lower() != booker_lower]
+        removed = False
+        if others and booker_email:
+            pre = patch_event(
+                calendar_id=api_cal,
+                event_id=event_id,
+                attendees=[booker_email],
+                resource_emails=resource_list,
+                send_updates="none",
+                access_token=access_token,
+            )
+            removed = pre.ok
         result = patch_event(
             calendar_id=api_cal,
             event_id=event_id,
-            summary=title,
             attendees=attendee_emails or None,
+            resource_emails=resource_list,
             send_updates="all",
             access_token=access_token,
         )
         if not result.ok:
+            if removed:
+                # 재추가 실패 시 참석자 원복 (메일 없이)
+                patch_event(
+                    calendar_id=api_cal,
+                    event_id=event_id,
+                    attendees=attendee_emails,
+                    resource_emails=resource_list,
+                    send_updates="none",
+                    access_token=access_token,
+                )
             return build_result_card(
                 title="초대 메일 실패",
                 lines=[calendar_error_message(result)],
@@ -797,6 +827,7 @@ def handle_schedule_management_action(
                 meet_link=meet_link,
                 html_link=html_link,
                 booker_email=booker_email,
+                resource_email=resource_id,
             )
 
         return build_booking_confirmed_card(

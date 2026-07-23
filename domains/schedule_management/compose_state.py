@@ -160,8 +160,9 @@ def _safe_form_value(form_inputs: dict[str, Any], key: str) -> str:
         ms = date_input.get("msSinceEpoch")
         if ms is not None:
             try:
-                # DATE_ONLY: Chat은 선택한 날짜의 UTC 00:00 ms를 보냄
-                dt = datetime.fromtimestamp(int(ms) / 1000.0, tz=UTC)
+                # DATE_ONLY(timezoneOffsetDate=KST 피커): 선택일 00:00 KST의 epoch ms가 온다.
+                # UTC 00:00이 오더라도 KST 해석은 같은 날짜(09:00 KST)라 안전.
+                dt = datetime.fromtimestamp(int(ms) / 1000.0, tz=KST)
                 return dt.strftime("%Y-%m-%d")
             except (ValueError, OSError):
                 pass

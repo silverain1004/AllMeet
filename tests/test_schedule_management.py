@@ -265,14 +265,20 @@ def test_handle_schedule_extracts_date_from_natural_language():
     assert out["cardsV2"][0]["cardId"] == "sm_compose_quick"
 
 
-def test_date_input_ms_parsed_as_utc_not_kst():
-    from datetime import datetime, timezone
+def test_date_input_ms_parsed_in_kst():
+    from datetime import datetime, timedelta, timezone
 
     from domains.schedule_management.compose_state import compose_state_from
 
-    utc = timezone.utc
-    ms = str(int(datetime(2026, 6, 5, tzinfo=utc).timestamp() * 1000))
+    kst = timezone(timedelta(hours=9))
+    # timezoneOffsetDate=540 피커: 선택일 00:00 KST epoch가 온다 (25일 선택 → 24일 15:00 UTC)
+    ms = str(int(datetime(2026, 7, 25, tzinfo=kst).timestamp() * 1000))
     state = compose_state_from({}, {"meeting_date": {"dateInput": {"msSinceEpoch": ms}}})
+    assert state["meeting_date"] == "2026-07-25"
+
+    # UTC 00:00로 오는 경우에도 KST 해석은 같은 날짜(09:00 KST)여야 한다
+    ms_utc = str(int(datetime(2026, 6, 5, tzinfo=timezone.utc).timestamp() * 1000))
+    state = compose_state_from({}, {"meeting_date": {"dateInput": {"msSinceEpoch": ms_utc}}})
     assert state["meeting_date"] == "2026-06-05"
 
 
@@ -744,14 +750,31 @@ def test_compose_confirm_booker_only_skips_invite_updates(patch_members, monkeyp
     assert captured.get("send_updates") == "none"
 
 
-def test_send_invite_patch_includes_attendees(patch_members, monkeypatch):
+def _send_invite_params(**overrides: str) -> dict[str, str]:
+    base = {
+        "last_api_calendar_id": "primary",
+        "last_event_id": "evt1",
+        "calendar_id": "user:u@x.com:primary",
+        "title": "킥오프",
+        "attendee_emails": "u@x.com,kim@x.com",
+        "booker_email": "u@x.com",
+        "resource_email": "room@resource.calendar.google.com",
+        "meeting_date": "2026-05-10",
+        "meeting_time": "10:00",
+        "meeting_end_time": "11:00",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_send_invite_two_phase_preserves_room_resource(patch_members, monkeypatch):
     from domains.schedule_management import calendar_client as cc
     from domains.schedule_management.handler import handle_schedule_management_action
 
-    captured: dict[str, Any] = {}
+    calls: list[dict[str, Any]] = []
 
     def fake_patch(**kwargs):
-        captured.update(kwargs)
+        calls.append(kwargs)
         return cc.CalendarResult(ok=True, created_event={"id": "evt1"})
 
     monkeypatch.setattr("domains.schedule_management.handler.patch_event", fake_patch)
@@ -762,23 +785,157 @@ def test_send_invite_patch_includes_attendees(patch_members, monkeypatch):
 
     out = handle_schedule_management_action(
         invoked_function="sm_send_invite",
-        parameters={
-            "last_api_calendar_id": "primary",
-            "last_event_id": "evt1",
-            "calendar_id": "user:u@x.com:primary",
-            "title": "킥오프",
-            "attendee_emails": "u@x.com,kim@x.com",
-            "booker_email": "u@x.com",
-            "meeting_date": "2026-05-10",
-            "meeting_time": "10:00",
-            "meeting_end_time": "11:00",
-        },
+        parameters=_send_invite_params(),
         form_inputs={},
         chat_event={"user": {"email": "u@x.com"}},
     )
-    assert captured.get("send_updates") == "all"
-    assert captured.get("attendees") == ["u@x.com", "kim@x.com"]
+    # 1차: 예약자만 남김(메일 없음) → 2차: 재추가(초대 메일 발송). 회의실 리소스는 항상 유지.
+    assert len(calls) == 2
+    assert calls[0]["attendees"] == ["u@x.com"]
+    assert calls[0]["send_updates"] == "none"
+    assert calls[0]["resource_emails"] == ["room@resource.calendar.google.com"]
+    assert calls[1]["attendees"] == ["u@x.com", "kim@x.com"]
+    assert calls[1]["send_updates"] == "all"
+    assert calls[1]["resource_emails"] == ["room@resource.calendar.google.com"]
+    assert "summary" not in calls[1]
     assert "초대 메일" in str(out)
+
+
+def test_send_invite_without_resource_param_defers_to_patch_preserve(patch_members, monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+    from domains.schedule_management.handler import handle_schedule_management_action
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_patch(**kwargs):
+        calls.append(kwargs)
+        return cc.CalendarResult(ok=True, created_event={"id": "evt1"})
+
+    monkeypatch.setattr("domains.schedule_management.handler.patch_event", fake_patch)
+    monkeypatch.setattr(
+        "domains.schedule_management.handler._resolve_calendar_auth",
+        lambda *_a, **_k: ("primary", "token"),
+    )
+
+    handle_schedule_management_action(
+        invoked_function="sm_send_invite",
+        parameters=_send_invite_params(resource_email=""),
+        form_inputs={},
+        chat_event={"user": {"email": "u@x.com"}},
+    )
+    # 구버전 카드(resource_email 없음): None을 넘겨 patch_event가 기존 리소스를 보존하게 한다
+    assert len(calls) == 2
+    assert calls[0]["resource_emails"] is None
+    assert calls[1]["resource_emails"] is None
+
+
+def test_send_invite_restores_attendees_when_resend_fails(patch_members, monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+    from domains.schedule_management.handler import handle_schedule_management_action
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_patch(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            return cc.CalendarResult(ok=False, error_kind="calendar_http_error")
+        return cc.CalendarResult(ok=True, created_event={"id": "evt1"})
+
+    monkeypatch.setattr("domains.schedule_management.handler.patch_event", fake_patch)
+    monkeypatch.setattr(
+        "domains.schedule_management.handler._resolve_calendar_auth",
+        lambda *_a, **_k: ("primary", "token"),
+    )
+
+    out = handle_schedule_management_action(
+        invoked_function="sm_send_invite",
+        parameters=_send_invite_params(),
+        form_inputs={},
+        chat_event={"user": {"email": "u@x.com"}},
+    )
+    # 2차(재추가) 실패 시 3차 호출로 참석자를 원복한다
+    assert len(calls) == 3
+    assert calls[2]["attendees"] == ["u@x.com", "kim@x.com"]
+    assert calls[2]["send_updates"] == "none"
+    assert "초대 메일 실패" in str(out)
+
+
+def test_patch_event_preserves_room_resource_when_not_specified(monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+
+    monkeypatch.setattr(cc, "is_dry_run", lambda: False)
+    monkeypatch.setattr(
+        cc,
+        "get_event",
+        lambda **kw: cc.CalendarResult(
+            ok=True,
+            created_event={
+                "attendees": [
+                    {"email": "u@x.com"},
+                    {"email": "room@resource.calendar.google.com", "resource": True},
+                ]
+            },
+        ),
+    )
+    sent: dict[str, Any] = {}
+
+    def fake_request(**kwargs):
+        sent.update(kwargs)
+        return {"id": "evt1"}, None
+
+    monkeypatch.setattr(cc, "_request", fake_request)
+    result = cc.patch_event(
+        calendar_id="primary",
+        event_id="evt1",
+        attendees=["u@x.com", "kim@x.com"],
+        access_token="token",
+    )
+    assert result.ok
+    atts = sent["body"]["attendees"]
+    assert {"email": "room@resource.calendar.google.com", "resource": True} in atts
+    assert {"email": "kim@x.com"} in atts
+
+
+def test_compose_confirm_invite_button_carries_resource_email(patch_members, monkeypatch):
+    from domains.schedule_management import calendar_client as cc
+    from domains.schedule_management.handler import handle_schedule_management_action
+
+    monkeypatch.setenv("SCHEDULE_DRY_RUN", "false")
+    monkeypatch.setattr("domains.schedule_management.handler.is_dry_run", lambda: False)
+    monkeypatch.setattr(
+        "domains.schedule_management.handler.get_rooms",
+        lambda: [
+            {
+                "id": "room1",
+                "name": "대회의실 A",
+                "calendar_resource_id": "room@resource.calendar.google.com",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "domains.schedule_management.handler._is_room_busy",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        "domains.schedule_management.handler.create_event",
+        lambda **kw: cc.CalendarResult(ok=True, created_event={"id": "evt1", "htmlLink": ""}),
+    )
+    monkeypatch.setattr("domains.schedule_management.handler.save_reservation", lambda **kw: "res1")
+
+    out = handle_schedule_management_action(
+        invoked_function="sm_compose_confirm",
+        parameters=_full_confirm_params(),
+        form_inputs={
+            "calendar_id": _form("user:u@x.com:primary"),
+            "meeting_date": _form("2026-05-10"),
+            "meeting_time": _form("10:00"),
+            "title": _form("킥오프"),
+        },
+        chat_event={"user": {"email": "u@x.com"}},
+    )
+    text = str(out)
+    assert "resource_email" in text
+    assert "room@resource.calendar.google.com" in text
 
 
 def test_parse_capacity_from_room_name():

@@ -387,6 +387,24 @@ def delete_event(
     return CalendarResult(ok=True)
 
 
+def get_event(
+    *,
+    calendar_id: str,
+    event_id: str,
+    access_token: str | None = None,
+) -> CalendarResult:
+    if not calendar_id or not event_id:
+        return CalendarResult(ok=False, error_kind="event_field_missing")
+    url = (
+        "https://www.googleapis.com/calendar/v3/calendars/"
+        f"{urllib.parse.quote(calendar_id, safe='')}/events/{urllib.parse.quote(event_id, safe='')}"
+    )
+    data, err = _request(url=url, method="GET", write=False, access_token=access_token)
+    if err is not None:
+        return err
+    return CalendarResult(ok=True, created_event=data or {})
+
+
 def patch_event(
     *,
     calendar_id: str,
@@ -415,7 +433,29 @@ def patch_event(
     if location is not None:
         body["location"] = location
     if attendees is not None or resource_emails is not None:
-        merged = _merge_attendees(attendees, resource_emails)
+        people = attendees
+        resources = resource_emails
+        # PATCH는 attendees 배열을 통째로 교체한다(기존 요소 폐기 — API 문서 명시).
+        # None으로 넘어온 쪽(사람/회의실 리소스)은 기존 이벤트에서 읽어 보존한다.
+        if people is None or resources is None:
+            existing = get_event(
+                calendar_id=calendar_id, event_id=event_id, access_token=access_token
+            )
+            if existing.ok:
+                current = (existing.created_event or {}).get("attendees") or []
+                if resources is None:
+                    resources = [
+                        str(a.get("email") or "")
+                        for a in current
+                        if isinstance(a, dict) and a.get("resource")
+                    ]
+                if people is None:
+                    people = [
+                        str(a.get("email") or "")
+                        for a in current
+                        if isinstance(a, dict) and not a.get("resource")
+                    ]
+        merged = _merge_attendees(people, resources)
         if merged:
             body["attendees"] = merged
     if not body:
