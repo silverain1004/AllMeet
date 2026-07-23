@@ -7,6 +7,7 @@ orchestrator 가 담당한다.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -68,6 +69,7 @@ def create_plan(
     plan = _normalize_plan(data)
     if plan.get("steps"):
         plan = critique_plan(plan, user_message)
+    _sanitize_email_args(plan.get("steps") or [], user_email)
     plan["planner_model"] = PLANNER_MODEL
     return plan
 
@@ -105,6 +107,7 @@ def revise_plan(
     plan = _normalize_plan(data)
     if plan.get("steps"):
         plan = critique_plan(plan, user_message)
+    _sanitize_email_args(plan.get("steps") or [], user_email)
     plan["planner_model"] = PLANNER_MODEL
     return plan
 
@@ -170,6 +173,33 @@ def decide_next_step(
             },
         }
     return {"action": action, "step": None}
+
+
+# LLM 이 실제 이메일 대신 자리표시자를 넣는 사고 방지 (예: "placeholder@user.email" 로
+# list_confluence_pages_by_author 가 account_id_unresolved 로 죽던 사례).
+_EMAIL_ARG_KEYS = ("modified_by_email", "user_email")
+_PLACEHOLDER_EMAIL_RE = re.compile(
+    r"placeholder|example\.|sample|user\.email|@company|@domain|@email\b|^me@|^test@|^user@|^your",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_email_args(steps: list[dict[str, Any]], user_email: str) -> None:
+    """step args 의 이메일 인자가 자리표시자·비정상 값이면 요청자 이메일로 교체 (in-place)."""
+    real = (user_email or "").strip()
+    if not real:
+        return
+    for s in steps:
+        args = s.get("args")
+        if not isinstance(args, dict):
+            continue
+        for key in _EMAIL_ARG_KEYS:
+            if key not in args:
+                continue
+            val = str(args.get(key) or "").strip()
+            if not val or "@" not in val or _PLACEHOLDER_EMAIL_RE.search(val):
+                logger.info("planner: 이메일 인자 보정 tool=%s %s=%r → 요청자", s.get("tool"), key, val)
+                args[key] = real
 
 
 def _normalize_plan(data: dict[str, Any]) -> dict[str, Any]:

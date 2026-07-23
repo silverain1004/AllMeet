@@ -579,7 +579,14 @@ def hello_http(request):
         if user_email and space_name and not active_plan
         else None
     )
-    if active_plan and is_plan_revision(user_message, active_plan, ctx_block):
+    # 결정적 fast-path 에 걸리는 발화(예: "주간보고 초안 줘")는 활성 계획이 있어도
+    # 계획 수정으로 하이재킹하지 않는다 — clarification 경로(_should_consume_clarification)와
+    # 동일한 가드. (활성 계획과 같은 주제의 기능 발화가 revision 으로 오판되던 사고 방지.)
+    if (
+        active_plan
+        and deterministic_intent(user_message, ctx_block) is None
+        and is_plan_revision(user_message, active_plan, ctx_block)
+    ):
         reply = handle_agent_revision(
             user_message,
             chat_event=payload,

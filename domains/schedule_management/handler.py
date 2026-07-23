@@ -703,6 +703,25 @@ def handle_schedule_management_action(
         if errors:
             state["errors"] = errors
             return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
+        # 카드 렌더 후 다른 예약이 잡혔거나 disabled 를 우회한 클릭 방어 — 확정 단계와 동일 기준으로 재검사
+        picked_room = _room_by_id(str(state.get("picked_room_id") or ""))
+        resource_id = str((picked_room or {}).get("calendar_resource_id") or "").strip()
+        if resource_id:
+            apply_duration_mode(state)
+            duration = int(state.get("duration_minutes") or 60)
+            end_time = resolve_end_time(state) or _end_time_from_start(
+                str(state["meeting_date"]), str(state["meeting_time"]), duration
+            )
+            if _is_room_busy(
+                resource_id,
+                start_iso=to_kst_iso(str(state["meeting_date"]), str(state["meeting_time"])),
+                end_iso=to_kst_iso(str(state["meeting_date"]), end_time),
+                access_token=None,
+            ):
+                state["picked_room_id"] = ""
+                state["picked_room_name"] = ""
+                state["errors"] = ["선택한 회의실이 해당 시간에 이미 사용 중입니다. 다른 회의실을 선택해 주세요."]
+                return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
         state["compose_step"] = "full"
         state["errors"] = []
         _ensure_calendar_id(state, chat_event)

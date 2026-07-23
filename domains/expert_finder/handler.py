@@ -164,7 +164,10 @@ def _build_result_card(
 
     all_hits = list(public_hits) + list(private_hits)
     scored = score_candidates(all_hits, keyword=keyword)
+    before_exclude = len(scored)
     scored = _exclude_requester(scored, requester_email)
+    # 본인이 실제로 후보에 잡혔다가 빠졌으면 카드에 명시 ("왜 나는 안 나오지?" 방지).
+    requester_excluded = len(scored) < before_exclude
     annotate_with_consent(scored, consenting)
     if progress:
         progress.done("score", len(scored))
@@ -195,6 +198,7 @@ def _build_result_card(
         window_label=used_window,
         member_pool=sources.get("member_pool") or [],
         draft=draft,
+        requester_excluded=requester_excluded,
     )
 
 

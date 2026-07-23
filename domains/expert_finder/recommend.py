@@ -2,7 +2,7 @@
 
 PLAN.md §5.1 `recommend.py`.
 
-호출 측 (handler) 에서 ``recommend(keyword, scored)`` 호출 → ``{experts: [{email, reason}]}``.
+호출 측 (handler) 에서 ``recommend(keyword, scored)`` 호출 → ``{experts: [{email, reason, has_evidence}]}``.
 실패 시 None 반환 → 카드는 raw evidence 만으로 표시.
 
 JSON schema 단순화: reason 만 LLM 생성, evidence 는 scored 객체에 이미 있으니 카드 빌더에서
@@ -32,7 +32,7 @@ def recommend(keyword: str, scored: list[dict[str, Any]]) -> dict[str, Any] | No
         scored: ``score_candidates`` 결과 (점수 내림차순).
 
     Returns:
-        ``{"experts": [{"email": "...", "reason": "..."}]}`` — 성공.
+        ``{"experts": [{"email": "...", "reason": "...", "has_evidence": bool}]}`` — 성공.
         ``None`` — Vertex 호출/파싱 실패. 호출 측은 raw 만으로 카드 빌드.
     """
     if not scored:
@@ -79,6 +79,9 @@ def _build_prompt(keyword: str, top3: list[dict[str, Any]]) -> str:
         "- 근거 자료 제목에서 보이는 구체적 활동을 인용하세요 (예: '~~ 협의를 주도', '~~ 시스템 구축에 참여').",
         "- 추측·과장 금지. 자료에 없는 사실 만들지 말 것.",
         "- 'XX팀 소속' 같은 메타 정보 반복 X (카드에 이미 표시됨).",
+        "- 각 후보마다 근거 자료가 키워드 전문성을 실제로 뒷받침하는지 has_evidence(불리언)로 판정하세요.",
+        "  키워드가 문서에 스치듯 언급된 수준(라이브러리 목록, 버그픽스 설명, 매뉴얼의 부수 항목 등)이면 false.",
+        "  has_evidence=false 인 후보의 reason 에는 근거가 약한 이유를 한 문장으로 쓰세요.",
         "",
         "후보 정보:",
     ]
@@ -93,7 +96,7 @@ def _build_prompt(keyword: str, top3: list[dict[str, Any]]) -> str:
             lines.append(f"   - [{src}] {title} ({when})")
 
     lines.append("")
-    lines.append("출력: JSON. experts 배열 — 각 항목은 {email, reason}. email 은 위 후보 email 그대로.")
+    lines.append("출력: JSON. experts 배열 — 각 항목은 {email, reason, has_evidence}. email 은 위 후보 email 그대로.")
     return "\n".join(lines)
 
 
@@ -107,8 +110,9 @@ _RESPONSE_SCHEMA = {
                 "properties": {
                     "email": {"type": "string"},
                     "reason": {"type": "string"},
+                    "has_evidence": {"type": "boolean"},
                 },
-                "required": ["email", "reason"],
+                "required": ["email", "reason", "has_evidence"],
             },
         },
     },

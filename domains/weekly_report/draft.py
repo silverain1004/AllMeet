@@ -672,19 +672,30 @@ def _vertex_analyze(
             meeting_date=meeting_date,
             raw=raw,
         )
-        res = model.generate_content(
-            prompt,
-            generation_config=GenerationConfig(
-                temperature=0.3,
-                max_output_tokens=8192,
-                response_mime_type="application/json",
-                response_schema=RESPONSE_SCHEMA,
-            ),
+        # flash 2.5 는 thinking 모델 — 사고 토큰이 max_output_tokens 예산을 같이 소모해서
+        # 입력이 크면 JSON 답변이 중간에 잘린다(Unterminated string → 파싱 실패 → raw 폴백).
+        # 예산을 넉넉히 주고, 잘림/빈 응답은 1회 재시도.
+        config = GenerationConfig(
+            temperature=0.3,
+            max_output_tokens=32768,
+            response_mime_type="application/json",
+            response_schema=RESPONSE_SCHEMA,
         )
-        text = (res.text or "").strip()
-        if not text:
-            return None
-        return json.loads(text)
+        last_err: Exception | None = None
+        for attempt in range(2):
+            res = model.generate_content(prompt, generation_config=config)
+            text = (res.text or "").strip()
+            if not text:
+                last_err = ValueError("빈 응답")
+                continue
+            try:
+                return json.loads(text)
+            except ValueError as e:
+                last_err = e
+                logger.warning("Vertex 분석 JSON 파싱 실패 (attempt %d/2): %s", attempt + 1, e)
+        if last_err:
+            raise last_err
+        return None
     except Exception as e:
         logger.warning("Vertex 분석 실패, raw 만 카드로 표시: %s", e)
         return None

@@ -1173,6 +1173,8 @@ def _room_widgets(
 
             top_label = f"{prefix}{html.escape(display_name)}"
 
+        is_busy = str(room.get("availability") or "") == "busy"
+
         widgets.append(
 
             {
@@ -1187,7 +1189,9 @@ def _room_widgets(
 
                     "button": {
 
-                        "text": "선택",
+                        "text": "사용 중" if is_busy else "선택",
+
+                        "disabled": is_busy,
 
                         "onClick": {
 

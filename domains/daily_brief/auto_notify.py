@@ -159,7 +159,8 @@ def _analyze_and_build_card(
             prompt,
             generation_config=GenerationConfig(
                 temperature=0.0,  # 할일 분류·우선순위는 재현성 우선 — 실행마다 결과가 흔들리지 않도록 0
-                max_output_tokens=4096,
+                # flash 2.5 thinking 토큰이 예산을 같이 소모 — 입력 크면 JSON 이 잘리므로 넉넉히.
+                max_output_tokens=16384,
                 response_mime_type="application/json",
                 response_schema=BRIEFING_RESPONSE_SCHEMA,
             ),

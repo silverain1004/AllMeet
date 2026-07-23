@@ -142,6 +142,7 @@ def _run_loop_inner(
     total = len(steps)
     repairs = 0
     react_inserts = 0
+    notices: list[str] = []  # 완료 메시지에 붙일 주의 문구 (switch_tool 대체 등)
 
     for i, original_step in enumerate(steps):
         n = original_step.get("n", i + 1)
@@ -268,6 +269,12 @@ def _run_loop_inner(
                     ),
                 }
 
+            # switch_tool 은 원 요청의 조건(작성자 필터 등)을 조용히 버릴 수 있어 완료 메시지에 명시.
+            if str(fix.get("action")) == "switch_tool" and fix.get("tool"):
+                notices.append(
+                    f"⚠️ '{step.get('tool')}' 단계가 실패해 '{fix.get('tool')}'(으)로 대체 실행했어요. "
+                    "원래 요청 조건 일부가 반영되지 않았을 수 있어요."
+                )
             step = repair.apply_fix(step, fix)
             continue  # 보정된 step 재시도
 
@@ -294,7 +301,7 @@ def _run_loop_inner(
                 react_inserts += 1
                 push(f"🔍 결과를 보고 단계를 추가합니다 — {inserted.get('why') or inserted.get('tool')}")
 
-    return {"outcome": OUTCOME_DONE, "results": results, "message": _summarize(goal, results)}
+    return {"outcome": OUTCOME_DONE, "results": results, "message": _summarize(goal, results, notices)}
 
 
 def verify_outcome(goal: str, results: dict[Any, Any]) -> dict[str, Any]:
@@ -367,6 +374,52 @@ def _needs_user(results: dict[Any, Any], ask: str) -> dict[str, Any]:
     return {"outcome": OUTCOME_NEEDS_USER, "results": results, "message": ask, "ask": ask}
 
 
+# 조회 도구가 리스트 결과를 담는 필드와, 항목의 제목/링크 후보 필드.
+_LIST_RESULT_FIELDS = ("pages", "files", "events", "messages", "items", "rooms", "experts", "results")
+_ITEM_TITLE_FIELDS = ("title", "name", "summary", "subject")
+_ITEM_LINK_FIELDS = ("web_link", "web_view_link", "html_link", "url", "link")
+_MAX_LIST_LINES = 10
+
+
+def _render_list_deliverable(results: dict[Any, Any]) -> str:
+    """content 산출물이 없을 때 — 마지막 성공 조회 단계의 리스트 결과를 사람이 읽게 렌더링."""
+    best: tuple[int, str, list[dict[str, Any]]] | None = None
+    for key, val in results.items():
+        if not isinstance(val, dict) or not val.get("ok") or val.get("skipped"):
+            continue
+        for field in _LIST_RESULT_FIELDS:
+            items = val.get(field)
+            if isinstance(items, list) and items and all(isinstance(x, dict) for x in items[:3]):
+                try:
+                    sort_key = int(key)
+                except (TypeError, ValueError):
+                    sort_key = 0
+                if best is None or sort_key >= best[0]:
+                    best = (sort_key, field, items)
+                break
+    if best is None:
+        return ""
+    _, field, items = best
+    lines = [f"📄 조회 결과 {len(items)}건:"]
+    for item in items[:_MAX_LIST_LINES]:
+        title = ""
+        for tf in _ITEM_TITLE_FIELDS:
+            title = str(item.get(tf) or "").strip()
+            if title:
+                break
+        if not title:
+            continue
+        link = ""
+        for lf in _ITEM_LINK_FIELDS:
+            link = str(item.get(lf) or "").strip()
+            if link:
+                break
+        lines.append(f"• {title[:80]}" + (f"\n  {link}" if link else ""))
+    if len(items) > _MAX_LIST_LINES:
+        lines.append(f"…외 {len(items) - _MAX_LIST_LINES}건")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def _extract_deliverable(results: dict[Any, Any]) -> str:
     """generate_content 등 최종 산출물 텍스트."""
     candidates: list[tuple[int, str]] = []
@@ -387,12 +440,18 @@ def _extract_deliverable(results: dict[Any, Any]) -> str:
     return candidates[-1][1]
 
 
-def _summarize(goal: str, results: dict[Any, Any]) -> str:
+def _summarize(goal: str, results: dict[Any, Any], notices: list[str] | None = None) -> str:
     done = len([1 for v in results.values() if isinstance(v, dict) and v.get("ok")])
     lines = [f"🎉 '{goal}' 작업을 마쳤어요. (완료 단계 {done}개)"]
     deliverable = _extract_deliverable(results)
+    if not deliverable:
+        # 조회로 끝나는 계획 — 생성 산출물(content)이 없으면 검색/조회 결과라도 보여준다.
+        # (결과 30건을 찾고도 "마쳤어요"만 push 되던 문제 방지.)
+        deliverable = _render_list_deliverable(results)
     if deliverable:
         lines.extend(["", deliverable])
+    for notice in notices or []:
+        lines.extend(["", notice])
     return "\n".join(lines)
 
 
