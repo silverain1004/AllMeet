@@ -13,7 +13,7 @@ from api.chat.loading import loading_text
 _FOOTER_TEXT = (
     "💡 검색 범위: 사내 공용 Drive · Confluence · 공용 Calendar + "
     "'내 데이터 연결' 동의자의 Gmail 메타 · 개인 Calendar. "
-    "메일 본문은 보지 않습니다."
+    "메일 본문은 보지 않으며, 요청자 본인은 추천 대상에서 제외됩니다."
 )
 
 
@@ -87,6 +87,7 @@ def build_result_card(
     window_label: str = "최근 6개월",
     member_pool: list[dict[str, Any]] | None = None,
     draft: dict[str, Any] | None = None,
+    requester_excluded: bool = False,
 ) -> dict[str, Any]:
     """추천 결과 카드.
 
@@ -97,6 +98,7 @@ def build_result_card(
         member_pool: 소속팀 라벨링용.
         draft: ``recommend.recommend`` 결과 — ``{"experts": [{"email", "reason"}]}``.
             None 이면 추천 멘트 없이 raw evidence 만 표시.
+        requester_excluded: 요청자 본인이 후보에 잡혔다가 제외됐으면 True — 카드에 명시.
     """
     safe_query = html.escape(query or "")
     safe_window = html.escape(window_label)
@@ -161,6 +163,19 @@ def build_result_card(
             "header": "참고 — 언급은 있으나 직접 근거 약함",
             "widgets": widgets,
         })
+
+    # 본인 제외 안내 — 본인이 실제로 후보에 잡혔던 경우에만 한 줄 명시.
+    if requester_excluded and sections:
+        sections[-1]["widgets"].append(
+            {
+                "textParagraph": {
+                    "text": (
+                        "ℹ️ 이 주제에 회원님 본인의 활동도 있었지만, "
+                        "본인은 추천 대상에서 제외하고 보여드려요."
+                    )
+                }
+            }
+        )
 
     # 푸터 — 같은 section 마지막 widget 으로 (sections 분리하면 chat 이 silently drop 한 사례 회피).
     if sections:
