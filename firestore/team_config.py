@@ -12,6 +12,9 @@ from .writes import get_client
 _CONFIG_COLLECTION = "config"
 _TEAM_LIST_DOC = "team_list"
 
+# 신규 팀 기본값 — MES2 와 동일 (최신 페이지 복사). PC2 만 from_template 로 별도 설정.
+DEFAULT_WEEKLY_PAGE_MODE = "copy_latest"
+
 _ALL_MEMBERS_TTL_SEC = 120
 _all_members_cache: tuple[float, list[dict[str, Any]]] | None = None
 GLOBAL_SETTING_FIELDS = {
@@ -52,7 +55,7 @@ def normalize_team_id(value: str) -> str:
     if not text:
         return ""
     normalized = re.sub(r"[^A-Za-z0-9]+", "", text).upper()
-    if normalized in {"PC2", "MES2"}:
+    if normalized in {"PC2", "MES2", "ERP2"}:
         return normalized
     return normalized or text.upper()
 
@@ -64,6 +67,8 @@ def make_team_id(team_name: str) -> str:
         return "PC2"
     if "MES2" in compact:
         return "MES2"
+    if "ERP2" in compact:
+        return "ERP2"
     base = re.sub(r"[^\w\u3130-\u318f\uac00-\ud7af]+", "_", raw)
     base = re.sub(r"_+", "_", base).strip("_")
     return normalize_team_id(base or "TEAM")

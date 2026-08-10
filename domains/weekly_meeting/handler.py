@@ -39,6 +39,7 @@ from api.drive.permissions import check_sa_member, grant_sa_reader
 from config.settings import BOT_SA_EMAIL, VACATION_CALENDAR_ID
 from domains.weekly_meeting.schedule_lookup import lookup_member_vacation, lookup_weekly_meeting
 from firestore.team_config import (
+    DEFAULT_WEEKLY_PAGE_MODE,
     delete_team,
     get_team_config,
     get_team_list,
@@ -456,7 +457,11 @@ def handle_weekly_meeting_action(
             team_name=team_name,
             space_id=space_id,
             user_context=user_context,
-            updates={"team_members": [], "setup_completed": False},
+            updates={
+                "team_members": [],
+                "setup_completed": False,
+                "weekly_page_mode": DEFAULT_WEEKLY_PAGE_MODE,
+            },
         )
         return {"actionResponse": {"type": "UPDATE_MESSAGE"}, "text": f"✅ 팀이 추가되었습니다: {team_name} (config/{team_id})"}
 

@@ -652,3 +652,57 @@ def build_scheduler_result_card(message: str, *, include_action_response: bool =
         _menu_back_button(),
     ]
     return _wrap_card("wm_scheduler_result", {"title": "AllMeet", "subtitle": "스케줄러 연동테스트"}, widgets, include_action_response=include_action_response)
+
+
+# ---------------------------------------------------------------------------
+# 자연어 주간회의 페이지 수동 생성
+# ---------------------------------------------------------------------------
+
+def build_page_create_in_progress_card(team_name: str) -> dict[str, Any]:
+    """즉시 응답 — 생성 중 안내."""
+    from api.chat.loading import loading_text
+
+    safe = html.escape(team_name or "팀")
+    return loading_text(f"{safe} 주간회의 페이지 생성 중이에요. 잠시 후 결과를 보내드릴게요.")
+
+
+def build_page_create_team_needed_card(teams: list[dict[str, str]]) -> dict[str, Any]:
+    """팀을 특정하지 못했을 때 — 등록 팀 목록 안내."""
+    if teams:
+        lines = ", ".join(html.escape(t.get("name") or t.get("id") or "") for t in teams)
+        body = (
+            "어느 팀의 주간회의 페이지를 만들까요?\n"
+            f"예: <b>ERP2팀 주간보고페이지 만들어줘</b>\n"
+            f"등록된 팀: {lines}"
+        )
+    else:
+        body = (
+            "어느 팀의 주간회의 페이지를 만들까요?\n"
+            "등록된 팀이 없습니다. 먼저 주간회의 메뉴에서 팀을 등록해 주세요."
+        )
+    return {"text": body}
+
+
+def build_page_create_result_card(
+    *,
+    team_name: str,
+    ok: bool,
+    detail: str,
+) -> dict[str, Any]:
+    """백그라운드 완료 후 Chat REST 로 푸시할 결과 카드."""
+    safe_team = html.escape(team_name or "")
+    safe_detail = html.escape(detail or "")
+    if ok:
+        title = f"{safe_team} 주간회의 페이지"
+        subtitle = "생성 완료"
+        body = safe_detail or "페이지 생성이 완료되었습니다."
+    else:
+        title = f"{safe_team} 주간회의 페이지"
+        subtitle = "생성 실패"
+        body = safe_detail or "페이지 생성에 실패했습니다."
+    widgets = [{"textParagraph": {"text": body}}]
+    return _wrap_card(
+        "wm_page_create_result",
+        {"title": title, "subtitle": subtitle},
+        widgets,
+    )

@@ -20,6 +20,7 @@ from api.confluence.previous_report import (
     get_previous_weekly_report_content,
 )
 from domains.weekly_meeting.page_html import (
+    apply_bold_adjacent_status_chips,
     apply_status_chip_colors,
     expand_name_placeholder_rows,
     fill_schedule_table_vacations,
@@ -143,33 +144,6 @@ _VACATION_CATEGORY_MAP: dict[str, str] = {
 }
 
 
-def _parse_vacation_event(summary: str) -> Optional[tuple[str, list[str], str]]:
-    """'종류(이름)' 또는 '종류(이름1, 이름2)' 형식 파싱.
-
-    원본 vacation_fetcher._parse_event_title 과 동일.
-    """
-    if not summary:
-        return None
-    m = re.match(r"^(.+?)\(([^)]+)\)\s*$", summary.strip())
-    if not m:
-        return None
-    kind = m.group(1).strip()
-    names_str = m.group(2).strip()
-    cat = _VACATION_CATEGORY_MAP.get(kind)
-    if cat is None and " " in kind:
-        cat = _VACATION_CATEGORY_MAP.get(kind.replace(" ", ""))
-    if cat is None and (kind.startswith("오전 ") or kind.startswith("오후 ")):
-        cat = _VACATION_CATEGORY_MAP.get(kind[3:].strip())
-    if cat is None:
-        # 폴백: 지역 접두/접미가 붙은 종류(예: '합정출장', '군산 출장')를
-        # 키워드 부분일치로 분류. 표시용 kind 는 원문 그대로 유지.
-        cat = _categorize_kind_by_keyword(kind)
-    if cat is None:
-        return None
-    names = [n.strip() for n in names_str.split(",") if n.strip()]
-    return (cat, names, kind)
-
-
 # 부분일치 폴백 키워드 → 카테고리 (우선순위 순).
 # 출산휴가·특별휴가 등은 위 _VACATION_CATEGORY_MAP 정확일치에서 이미 처리되므로
 # 여기 '휴가' 폴백까지 내려오지 않는다.
@@ -178,6 +152,12 @@ _KEYWORD_CATEGORY_ORDER: tuple[tuple[str, str], ...] = (
     ("외근", "field_work"),
     ("재택", "remote"),
     ("휴가", "vacation"),
+    ("연차", "vacation"),
+    ("반차", "vacation"),
+    ("반반차", "vacation"),
+    ("공가", "vacation"),
+    ("병가", "vacation"),
+    ("경조", "vacation"),
 )
 
 
@@ -187,6 +167,133 @@ def _categorize_kind_by_keyword(kind: str) -> Optional[str]:
         if label in kind:
             return key
     return None
+
+
+def _resolve_vacation_category(kind: str) -> Optional[str]:
+    """종류 문자열 → 카테고리 키. 정확일치 → 공백제거 → 오전/오후 접두 → 키워드 폴백."""
+    if not kind:
+        return None
+    cat = _VACATION_CATEGORY_MAP.get(kind)
+    if cat is None and " " in kind:
+        cat = _VACATION_CATEGORY_MAP.get(kind.replace(" ", ""))
+    if cat is None and (kind.startswith("오전 ") or kind.startswith("오후 ")):
+        cat = _VACATION_CATEGORY_MAP.get(kind[3:].strip())
+        if cat is None:
+            cat = _VACATION_CATEGORY_MAP.get(kind[3:].strip().replace(" ", ""))
+    if cat is None:
+        # 폴백: 지역 접두/접미가 붙은 종류(예: '합정출장', '군산 출장', '출장(군산)')
+        cat = _categorize_kind_by_keyword(kind)
+    return cat
+
+
+def _strip_name_annotation(raw_name: str) -> tuple[str, str]:
+    """'김도현(대체)' → ('김도현', '대체'). 주석 없으면 annotation=''."""
+    text = (raw_name or "").strip()
+    m = re.match(r"^(.+?)\(([^)]+)\)\s*$", text)
+    if not m:
+        return text, ""
+    return m.group(1).strip(), m.group(2).strip()
+
+
+_DASH_CHARS = frozenset("-–—")
+
+
+def _parse_paren_vacation_event(summary: str) -> Optional[tuple[str, list[str], str]]:
+    """PC2/MES2 형식: '종류(이름)' 또는 '종류(이름1, 이름2)'."""
+    m = re.match(r"^(.+?)\(([^)]+)\)\s*$", summary.strip())
+    if not m:
+        return None
+    kind = m.group(1).strip()
+    # '연차 - 김도현(대체)' 처럼 대시 형식에 이름 주석이 붙은 경우 제외
+    if any(ch in kind for ch in _DASH_CHARS):
+        return None
+    names_str = m.group(2).strip()
+    cat = _resolve_vacation_category(kind)
+    if cat is None:
+        return None
+    names = [n.strip() for n in names_str.split(",") if n.strip()]
+    if not names:
+        return None
+    return (cat, names, kind)
+
+
+def _parse_dash_vacation_event(summary: str) -> list[tuple[str, list[str], str]]:
+    """ERP2 형식: '종류 - 이름' / '종류-이름' / 한 제목에 여러 쌍·여러 이름.
+
+    예)
+      재택 - 정주현
+      합정출장-김도현
+      연차 - 김도현(대체), 박소영(대체)
+      오전반차 - 박소영, 연차 - 임연주
+      연차 - 김도현, 정주현
+    """
+    text = (summary or "").strip()
+    if not text or not any(ch in text for ch in _DASH_CHARS):
+        return []
+
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
+        return []
+
+    results: list[tuple[str, list[str], str]] = []
+    current_kind: Optional[str] = None
+    current_entries: list[tuple[str, str]] = []  # (pure_name, annotation)
+
+    def _flush() -> None:
+        nonlocal current_kind, current_entries
+        if not current_kind or not current_entries:
+            current_kind = None
+            current_entries = []
+            return
+        cat = _resolve_vacation_category(current_kind)
+        if cat is None:
+            current_kind = None
+            current_entries = []
+            return
+        # 주석이 있으면 표시용 kind 에 병기 (같은 주석끼리 묶음)
+        by_ann: dict[str, list[str]] = {}
+        for pure, ann in current_entries:
+            by_ann.setdefault(ann, []).append(pure)
+        for ann, names in by_ann.items():
+            display_kind = f"{current_kind}({ann})" if ann else current_kind
+            results.append((cat, names, display_kind))
+        current_kind = None
+        current_entries = []
+
+    for part in parts:
+        # 대시로 종류/이름 분리 — 첫 번째 대시만 사용
+        m = re.match(r"^(.+?)\s*[-–—]\s*(.+)$", part)
+        if m:
+            _flush()
+            current_kind = m.group(1).strip()
+            pure, ann = _strip_name_annotation(m.group(2).strip())
+            current_entries = [(pure, ann)] if pure else []
+        else:
+            # 대시 없음 → 직전 종류의 추가 이름
+            if current_kind is None:
+                continue
+            pure, ann = _strip_name_annotation(part)
+            if pure:
+                current_entries.append((pure, ann))
+
+    _flush()
+    return results
+
+
+def _parse_vacation_event(summary: str) -> list[tuple[str, list[str], str]]:
+    """휴가/일정 이벤트 제목 파싱. 0개 이상 (카테고리, 이름목록, 표시종류) 반환.
+
+    지원 형식:
+      - PC2/MES2: '종류(이름)' / '종류(이름1, 이름2)'
+      - ERP2:     '종류 - 이름' / '종류-이름' / 한 제목에 여러 쌍
+    """
+    if not summary or not str(summary).strip():
+        return []
+    text = str(summary).strip()
+    paren = _parse_paren_vacation_event(text)
+    if paren is not None:
+        return [paren]
+    return _parse_dash_vacation_event(text)
 
 
 def _build_team_lookup(
@@ -363,48 +470,51 @@ def _build_vacation_map(
 
         for event in res.events:
             summary = event.get("summary", "")
-            parsed = _parse_vacation_event(summary)
-            if parsed is None:
+            parsed_list = _parse_vacation_event(summary)
+            if not parsed_list:
                 skipped.append(summary)
                 continue
 
-            cat_key, event_names, kind = parsed
             dates = _get_event_dates(event)
-            if cat_key not in acc or not dates:
+            if not dates:
                 skipped.append(summary)
                 continue
 
-            for event_name in event_names:
-                # valid_ids 로 직접 매칭 (정식 이름 또는 닉네임)
-                matched_id: str | None = None
-                if event_name in valid_ids:
-                    matched_id = event_name
-                else:
-                    for vid in valid_ids:
-                        if event_name in vid or vid in event_name:
-                            matched_id = vid
-                            break
-
-                if matched_id is None:
-                    unmatched.append(f"{summary}({event_name})")
+            for cat_key, event_names, kind in parsed_list:
+                if cat_key not in acc:
                     continue
 
-                # 닉네임이면 정식 이름으로 변환
-                display_name = nickname_to_name.get(matched_id, matched_id)
-
-                for date_str in dates:
-                    if s_mon_this <= date_str <= s_fri_this:
-                        week = "this_week"
-                    elif s_mon_next <= date_str <= s_fri_next:
-                        week = "next_week"
+                for event_name in event_names:
+                    # valid_ids 로 직접 매칭 (정식 이름 또는 닉네임)
+                    matched_id: str | None = None
+                    if event_name in valid_ids:
+                        matched_id = event_name
                     else:
-                        continue  # 주말 또는 범위 외
+                        for vid in valid_ids:
+                            if event_name in vid or vid in event_name:
+                                matched_id = vid
+                                break
 
-                    bucket_key = (cat_key, display_name, kind, week)
-                    if bucket_key not in date_buckets:
-                        date_buckets[bucket_key] = []
-                    if date_str not in date_buckets[bucket_key]:
-                        date_buckets[bucket_key].append(date_str)
+                    if matched_id is None:
+                        unmatched.append(f"{summary}({event_name})")
+                        continue
+
+                    # 닉네임이면 정식 이름으로 변환
+                    display_name = nickname_to_name.get(matched_id, matched_id)
+
+                    for date_str in dates:
+                        if s_mon_this <= date_str <= s_fri_this:
+                            week = "this_week"
+                        elif s_mon_next <= date_str <= s_fri_next:
+                            week = "next_week"
+                        else:
+                            continue  # 주말 또는 범위 외
+
+                        bucket_key = (cat_key, display_name, kind, week)
+                        if bucket_key not in date_buckets:
+                            date_buckets[bucket_key] = []
+                        if date_str not in date_buckets[bucket_key]:
+                            date_buckets[bucket_key].append(date_str)
 
         if skipped:
             logger.info("[vacation] 파싱/카테고리 스킵 %d건: %s", len(skipped), skipped)
@@ -515,6 +625,24 @@ def _get_quarter_folder(
     return quarter_id
 
 
+def _resolve_target_folder(
+    client: ConfluenceClient,
+    cfg: dict,
+    root_id: str,
+    team_name: str,
+    reference_date: datetime,
+) -> str:
+    """페이지를 생성할 대상 폴더 ID.
+
+    weekly_folder_layout="single" (ERP2): 연/분기 폴더 없이 root 폴더에 바로 생성.
+    그 외 (PC2/MES2): 기존 YYYY년 > N분기 구조 탐색/생성.
+    """
+    layout = str(cfg.get("weekly_folder_layout") or "").strip().lower()
+    if layout == "single":
+        return root_id
+    return _get_quarter_folder(client, root_id, team_name, reference_date)
+
+
 # ---------------------------------------------------------------------------
 # MES2: copy_latest
 # ---------------------------------------------------------------------------
@@ -568,30 +696,60 @@ def _create_by_copy(team_id: str, cfg: dict) -> str:
         except Exception as exc:
             logger.warning("[%s] 일정 공유 채우기 실패: %s", team_id, exc)
 
-    quarter_id = _get_quarter_folder(client, root_id, team_name, reference_date)
+    status_chip_mode = str(cfg.get("status_chip_mode") or "").strip().lower()
+    if status_chip_mode == "label_date":
+        # 일정 공유 갱신과 같은 타이밍에 상태(날짜) 칩 색상도 함께 갱신 (ERP2 전용).
+        full_html = apply_status_chip_colors(full_html)
+        full_html = apply_bold_adjacent_status_chips(full_html)
+
+    target_folder_id = _resolve_target_folder(client, cfg, root_id, team_name, reference_date)
 
     title = f"{reference_date.strftime('%Y-%m-%d')} {team_name} 주간회의"
-    existing_id = _find_page_in_folder(client, quarter_id, title)
+    existing_id = _find_page_in_folder(client, target_folder_id, title)
     if existing_id:
-        # 기존 페이지가 있으면 본문(사용자 작성 내용)은 보존하고 일정 공유 표만 패치.
-        # from_template 경로와 동일 — 스케줄러 재실행 시 최신 휴가 데이터가 반영되게 함.
+        # 기존 페이지가 있으면 본문(사용자 작성 내용)은 보존하고
+        # 일정 공유(휴가)·주차 날짜만 패치. vacation_map 이 비어도 스킵하지 않음
+        # (자연어 재요청 / 스케줄러 재실행 시 최신 휴가 반영).
         try:
             existing_page = client.get_page(existing_id, expand="body.storage")
             existing_html = ((existing_page.get("body") or {}).get("storage") or {}).get("value") or ""
         except Exception as e:
             logger.warning("[%s] 기존 페이지 본문 조회 실패: %s", team_id, e)
             existing_html = ""
-        if not existing_html or not vacation_map:
-            return f"이미 존재 — 스킵 (page_id={existing_id}, title={title})"
-        patched = fill_schedule_table_vacations(existing_html, vacation_map)
+
+        if not existing_html:
+            # 본문 조회 실패 시에만 복사본으로 전체 재생성
+            client.update_page(existing_id, title=title, html_content=full_html)
+            return f"기존 페이지 업데이트 완료(본문 조회 실패→재생성): {title} (page_id={existing_id})"
+
+        patched = existing_html
+        if vacation_map:
+            patched = fill_schedule_table_vacations(patched, vacation_map)
+        patched = update_week_range_in_schedule_table(patched, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
+        patched = update_week_range_in_assignee_table(patched, week_phs["THIS_WEEK"], week_phs["NEXT_WEEK"])
+        if status_chip_mode == "label_date":
+            patched = apply_status_chip_colors(patched)
+            patched = apply_bold_adjacent_status_chips(patched)
         client.update_page(existing_id, title=title, html_content=patched)
-        return f"기존 페이지 패치 완료(본문 보존, 일정 공유 갱신): {title} (page_id={existing_id})"
+        if vacation_map:
+            return f"기존 페이지 패치 완료(본문 보존, 일정 공유 갱신): {title} (page_id={existing_id})"
+        return f"기존 페이지 패치 완료(본문 보존, 일정 이벤트 없음): {title} (page_id={existing_id})"
 
     space_key = _get_space_key(cfg)
     if not space_key:
         raise RuntimeError(f"config/{team_id}: confluence_space_key 또는 space_key 가 없습니다.")
-    page = client.create_page(title=title, html_content=full_html, parent_id=quarter_id, space_key=space_key)
-    return f"페이지 생성 완료: {title} (page_id={page.get('id', '')})"
+    page = client.create_page(title=title, html_content=full_html, parent_id=target_folder_id, space_key=space_key)
+    new_page_id = str(page.get("id") or "")
+
+    layout = str(cfg.get("weekly_folder_layout") or "").strip().lower()
+    if layout == "single" and new_page_id and latest_page_id:
+        # flat 레이아웃: 신규 페이지가 항상 목록 맨 위(최신)에 오도록 직전 최신 페이지 앞으로 재배치.
+        try:
+            client.move_page_position(new_page_id, "before", latest_page_id)
+        except Exception as exc:
+            logger.warning("[%s] 신규 페이지 정렬 실패: %s", team_id, exc)
+
+    return f"페이지 생성 완료: {title} (page_id={new_page_id})"
 
 
 # ---------------------------------------------------------------------------
@@ -723,8 +881,8 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
     # 6) 잔여 플레이스홀더 제거
     html = re.sub(r"\{\{[A-Z0-9_]+\}\}", "", html)
 
-    # 7) 분기 폴더 탐색/생성
-    quarter_id = _get_quarter_folder(client, root_id, team_name, reference_date)
+    # 7) 대상 폴더 탐색/생성 (single 레이아웃이면 root 폴더 그대로)
+    target_folder_id = _resolve_target_folder(client, cfg, root_id, team_name, reference_date)
     title = f"{reference_date.strftime('%Y-%m-%d')} {team_name} 주간회의"
     space_key = _get_space_key(cfg)
     if not space_key:
@@ -733,7 +891,7 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
     # 8) 기존 페이지가 있으면 본문(사용자가 주중에 작성한 내용)은 보존하고
     #    일정 공유 표·주차 날짜·진도율 칩 색상만 패치. 없으면 템플릿으로 신규 생성.
     #    (매일 10시 스케줄러가 같은 reference_date 로 재실행돼도 작성 내용이 날아가지 않게 함)
-    existing_id = _find_page_in_folder(client, quarter_id, title)
+    existing_id = _find_page_in_folder(client, target_folder_id, title)
     if existing_id:
         try:
             existing_page = client.get_page(existing_id, expand="body.storage")
@@ -756,7 +914,7 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
         client.update_page(existing_id, title=title, html_content=patched)
         return f"기존 페이지 패치 완료(본문 보존): {title} (page_id={existing_id})"
 
-    page = client.create_page(title=title, html_content=html, parent_id=quarter_id, space_key=space_key)
+    page = client.create_page(title=title, html_content=html, parent_id=target_folder_id, space_key=space_key)
     return f"페이지 생성 완료: {title} (page_id={page.get('id', '')})"
 
 
@@ -775,9 +933,14 @@ def run_weekly_page_job(team_id: str) -> str:
 
     mode = str(cfg.get("weekly_page_mode") or "").strip()
     if not mode:
-        raise RuntimeError(
-            f"config/{team_id} 문서에 weekly_page_mode 필드가 없습니다. "
-            f"'copy_latest' 또는 'from_template' 을 추가하세요."
+        # 신규 팀 추가 시 누락됐거나 구 문서 — MES2 와 동일하게 copy_latest 로 동작
+        from firestore.team_config import DEFAULT_WEEKLY_PAGE_MODE
+
+        mode = DEFAULT_WEEKLY_PAGE_MODE
+        logger.warning(
+            "config/%s 에 weekly_page_mode 없음 → 기본값 %s 사용",
+            team_id,
+            mode,
         )
 
     logger.info("weekly_page_job team=%s mode=%s", team_id, mode)
@@ -806,8 +969,13 @@ def run_weekly_page_jobs_all() -> str:
                 continue
             mode = str(cfg.get("weekly_page_mode") or "").strip()
             if not mode:
-                logger.info("weekly_page_mode 미설정, 스킵: %s", tid)
-                continue
+                from firestore.team_config import DEFAULT_WEEKLY_PAGE_MODE
+
+                logger.info(
+                    "weekly_page_mode 미설정 → 기본값 %s 로 처리: %s",
+                    DEFAULT_WEEKLY_PAGE_MODE,
+                    tid,
+                )
             result = run_weekly_page_job(tid)
             results.append(f"[{tid}] {result}")
         except Exception as e:

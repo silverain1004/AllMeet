@@ -26,6 +26,12 @@ _FREE_SLOT_RE = re.compile(r"빈\s*시간")
 _WM_SETUP_RE = re.compile(r"(팀\s*등록|인원\s*등록|멤버\s*등록|주간\s*업무\s*설정)")
 _WEEKLY_MEETING_RE = re.compile(r"주간\s*회의")
 _WM_ACTION_RE = re.compile(r"(등록|설정|세팅)")
+# weekly_page_create: 주간회의/보고 페이지 수동 생성. 요약·검색·초안은 부정가드.
+_WEEKLY_PAGE_SUBJECT_RE = re.compile(
+    r"주간\s*(?:회의|보고)?\s*페이지|주간\s*(?:회의|보고)\s*페이지"
+)
+_WEEKLY_PAGE_CREATE_RE = re.compile(r"(만들|생성|작성)")
+_WEEKLY_PAGE_CREATE_NEG_RE = re.compile(r"(요약|찾아|검색|초안)")
 
 # daily_chat 회수 CTA 판별 — action-like 사내 업무 신호(decoration 전용, 약간 liberal).
 _RECOVERY_NOUN_RE = re.compile(
@@ -150,6 +156,21 @@ def looks_like_weekly_meeting_setup(msg: str) -> bool:
     if _WEEKLY_MEETING_RE.search(text) and _WM_ACTION_RE.search(text):
         return True
     return False
+
+
+def looks_like_weekly_page_create(msg: str) -> bool:
+    """'OO팀 주간(회의|보고)페이지 만들어/생성해줘' — 스케줄러 없이 수동 생성.
+
+    요약·찾아·검색·초안이 포함되면 False (agent / weekly_report_draft 유지).
+    """
+    text = (msg or "").strip()
+    if not text:
+        return False
+    if _WEEKLY_PAGE_CREATE_NEG_RE.search(text):
+        return False
+    if not _WEEKLY_PAGE_SUBJECT_RE.search(text):
+        return False
+    return bool(_WEEKLY_PAGE_CREATE_RE.search(text))
 
 
 def looks_actionable_for_recovery(msg: str) -> bool:

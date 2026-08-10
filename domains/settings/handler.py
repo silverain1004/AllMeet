@@ -20,6 +20,7 @@ from api.drive.permissions import check_sa_member, grant_sa_reader
 from config.settings import BOT_SA_EMAIL
 from domains.weekly_meeting.schedule_lookup import lookup_weekly_meeting
 from firestore.team_config import (
+    DEFAULT_WEEKLY_PAGE_MODE,
     delete_team,
     get_team_config,
     get_team_list,
@@ -250,7 +251,11 @@ def handle_settings_action(
             team_name=team_name,
             space_id=space_id,
             user_context=user_context,
-            updates={"team_members": [], "setup_completed": False},
+            updates={
+                "team_members": [],
+                "setup_completed": False,
+                "weekly_page_mode": DEFAULT_WEEKLY_PAGE_MODE,
+            },
         )
         teams = get_team_list()
         return _render_team_card(teams=teams, ctx_team_id=team_id, include_action_response=True)

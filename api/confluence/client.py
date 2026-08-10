@@ -134,6 +134,14 @@ class ConfluenceClient:
             raise RuntimeError(f"페이지 업데이트 실패: {res.status_code} — {res.text[:500]}")
         return res.json()
 
+    def move_page_position(self, page_id: str, position: str, target_id: str) -> dict:
+        """v1: 같은 부모 아래에서 페이지 순서만 재배치. position: before|after|append."""
+        url = f"{self._api_url}/{page_id}/move/{position}/{target_id}"
+        res = requests.put(url, headers=self._headers())
+        if res.status_code not in (200, 204):
+            raise RuntimeError(f"페이지 순서 이동 실패: {res.status_code} — {res.text[:300]}")
+        return res.json() if res.text else {}
+
     # -------------------------------------------------------------------------
     # 폴더 (REST v2)
     # -------------------------------------------------------------------------

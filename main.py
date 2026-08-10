@@ -40,7 +40,11 @@ from domains.schedule_management import (
     handle_schedule_management,
     handle_schedule_management_action,
 )
-from domains.weekly_meeting import handle_weekly_meeting, handle_weekly_meeting_action
+from domains.weekly_meeting import (
+    handle_weekly_meeting,
+    handle_weekly_meeting_action,
+    handle_weekly_page_create,
+)
 from domains.weekly_report import handle_weekly_report_draft
 
 import json as _json
@@ -94,6 +98,7 @@ class UserIntent(str, Enum):
     SCHEDULE_MANAGEMENT = "schedule_management"
     SETTINGS = "settings"
     WEEKLY_MEETING = "weekly_meeting"
+    WEEKLY_PAGE_CREATE = "weekly_page_create"
     WEEKLY_REPORT_DRAFT = "weekly_report_draft"
 
 
@@ -233,6 +238,9 @@ def _dispatch_by_intent(
         case UserIntent.WEEKLY_MEETING:
             # 주간 회의·팀/인원 등록: 샘플 cardsV2 (domains.weekly_meeting)
             return handle_weekly_meeting(user_message, chat_event=payload)
+        case UserIntent.WEEKLY_PAGE_CREATE:
+            # 주간회의 페이지 수동 생성: 즉시 응답 + 백그라운드에서 run_weekly_page_job
+            return handle_weekly_page_create(user_message, chat_event=payload)
         case UserIntent.WEEKLY_REPORT_DRAFT:
             # 주간보고초안: 즉시 응답 + 백그라운드 thread 가 데이터 수집·Vertex 분석 후 push
             reply = handle_weekly_report_draft(user_message, chat_event=payload)

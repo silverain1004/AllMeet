@@ -16,6 +16,8 @@ ROUTING_MATRIX = [
     ("주간회의 팀 등록", "weekly_meeting"),
     ("팀 등록", "weekly_meeting"),
     ("주간회의 페이지 핵심 요약해줘", "agent"),
+    ("ERP2팀 주간보고페이지 만들어줘", "weekly_page_create"),
+    ("PC2팀 주간회의 페이지 생성해줘", "weekly_page_create"),
     ("점심 메뉴 추천해줘", "daily_chat"),
     ("E-BIZ 찾고 배포 체크리스트 만들어줘", "agent"),
     ("최신 주간보고 페이지 찾아서 요약해줘", "agent"),

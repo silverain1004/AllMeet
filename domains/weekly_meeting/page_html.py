@@ -162,8 +162,52 @@ def expand_name_placeholder_rows(
 # 진도율 칩 색상
 # ---------------------------------------------------------------------------
 
+# 상태(날짜) 형식 (ERP2) — 상태 텍스트 기준 색상. 띄어쓰기 차이는 정규화 후 비교.
+_STATUS_LABEL_COLOURS = {
+    "대기": "Grey",
+    "보류": "Grey",
+    "진행중": "Yellow",
+    "완료": "Green",
+    "완료예정": "Green",
+}
+
+# 날짜 한 조각: m/d, d 대신 예정을 뜻하는 'E'도 허용 (예: 8/6, 8/E, 08/04)
+_DATE_UNIT = r"\d{1,2}/(?:\d{1,2}|E)"
+# 범위 구분자: '~' 뿐 아니라 '-' 로 쓰는 경우도 실데이터에 존재 (예: '7/27-8/24')
+_DATE_SEP = r"[~-]"
+# 날짜 칸 전체: m/d, ~m/d, m/d~, m/d~m/d(또는 '-' 구분), 날짜 미정('-'/빈값)도 허용
+_DATE_TOKEN_RE = re.compile(
+    rf"^(?:{_DATE_UNIT}{_DATE_SEP}{_DATE_UNIT}|{_DATE_UNIT}{_DATE_SEP}|{_DATE_SEP}{_DATE_UNIT}|{_DATE_UNIT}|-|)$"
+)
+_LABEL_DATE_TITLE_RE = re.compile(r"^(?P<label>[^()]+?)\s*\((?P<date>[^()]*)\)\s*$")
+
+
+def _status_macro_colour(title: str) -> Optional[str]:
+    """status 매크로 title 로 colour 결정.
+
+    1) '상태(날짜)' 형식(예: '완료(8/6)', '진행중(~8/13)', '완료예정(8/E)')이면
+       상태 텍스트로 결정: 대기·보류→Grey, 진행중→Yellow, 완료·완료예정→Green.
+       상태 텍스트의 띄어쓰기는 무시(정규화)하지만, 인식되지 않는 텍스트거나 날짜 칸이
+       날짜 형식이 아니면 색을 바꾸지 않음(None) — 오분류보다 미변경이 안전.
+    2) 괄호 형식이 아니면 기존 %(0→Grey,1~99→Yellow,100→Green) 로직으로 폴백.
+    """
+    t = (title or "").strip()
+    m = _LABEL_DATE_TITLE_RE.match(t)
+    if m:
+        label = re.sub(r"\s+", "", m.group("label"))
+        date_part = m.group("date").strip()
+        if label in _STATUS_LABEL_COLOURS and _DATE_TOKEN_RE.match(date_part):
+            return _STATUS_LABEL_COLOURS[label]
+        return None
+    if "100%" in t or t in ("100", "100%"):
+        return "Green"
+    if not t or t in ("0%", "-%", "0", "-") or t.startswith("-"):
+        return "Grey"
+    return "Yellow"
+
+
 def apply_status_chip_colors(html: str) -> str:
-    """Confluence status 매크로 colour: 0%→Grey, 1~99%→Yellow, 100%→Green."""
+    """Confluence status 매크로 title 기준 colour 자동 지정 (판정 기준은 _status_macro_colour 참고)."""
     if not html or 'ac:name="status"' not in html:
         return html
 
@@ -176,13 +220,9 @@ def apply_status_chip_colors(html: str) -> str:
         inner = m.group(1)
         title_m = re.search(r'<ac:parameter\s+ac:name="title"[^>]*>([\s\S]*?)</ac:parameter>', inner, re.IGNORECASE)
         title = re.sub(r"<[^>]+>", "", title_m.group(1) if title_m else "").strip()
-        t = (title or "").strip()
-        if "100%" in t or t in ("100", "100%"):
-            colour = "Green"
-        elif not t or t in ("0%", "-%", "0", "-") or t.startswith("-"):
-            colour = "Grey"
-        else:
-            colour = "Yellow"
+        colour = _status_macro_colour(title)
+        if colour is None:
+            return m.group(0)
         colour_param = f'<ac:parameter ac:name="colour">{colour}</ac:parameter>'
         if re.search(r'<ac:parameter\s+ac:name="colour"', inner, re.IGNORECASE):
             inner = re.sub(
@@ -195,6 +235,86 @@ def apply_status_chip_colors(html: str) -> str:
 
     return pattern.sub(_replace, html)
 
+
+# ---------------------------------------------------------------------------
+# 볼드 제목 옆 일반 텍스트 → 실제 Status 칩으로 변환 (ERP2)
+# ---------------------------------------------------------------------------
+
+# '(' ~ ')' 사이에 <span>/<strong> 같은 인라인 태그가 섞여 있어도 매칭 (짧은 주석용, 폭주 방지로 길이 제한)
+_PAREN_WITH_INLINE_TAGS_RE = re.compile(r"\((?:[^()<]|<[^>]+>){1,200}?\)")
+
+
+def _is_bold_adjacent(html: str, pos: int, window: int = 400) -> bool:
+    """pos 시작 지점이 아직 안 닫힌 <strong> 안(볼드체 제목 뒤)인지 확인."""
+    start = max(0, pos - window)
+    segment = html[start:pos]
+    last_open = segment.rfind("<strong")
+    if last_open == -1:
+        return False
+    return not re.search(r"</strong\s*>", segment[last_open:], re.IGNORECASE)
+
+
+def _split_label_and_date(inner_plain: str) -> Optional[tuple[str, str]]:
+    """'(완료 예정, 8/13)' / '(8/13, 완료 예정)' / '(완료)' → (정규화된 라벨, 날짜부분).
+    5개 키워드 중 정확히 하나와 일치할 때만 반환, 아니면 None(오탐 방지)."""
+    body = inner_plain.strip()
+    if not (body.startswith("(") and body.endswith(")")):
+        return None
+    body = body[1:-1]
+    parts = body.split(",")
+    if len(parts) == 1:
+        label = re.sub(r"\s+", "", parts[0])
+        if label in _STATUS_LABEL_COLOURS:
+            return label, ""
+        return None
+    if len(parts) == 2:
+        a = re.sub(r"\s+", "", parts[0])
+        b = re.sub(r"\s+", "", parts[1])
+        if b in _STATUS_LABEL_COLOURS:
+            return b, parts[0].strip()
+        if a in _STATUS_LABEL_COLOURS:
+            return a, parts[1].strip()
+    return None
+
+
+def apply_bold_adjacent_status_chips(html: str) -> str:
+    """볼드체 제목 옆에 '(날짜, 상태)'/'(상태, 날짜)'/'(상태)' 형식 일반 텍스트가 붙어 있으면
+    실제 Status 매크로(칩)로 바꿔치기. 볼드체에 붙어있지 않거나 5개 키워드와 정확히
+    일치하지 않으면 건드리지 않음(오탐 방지 — 제목 자체의 괄호, 예: '제조원가분석(견적용)' 등은 무시)."""
+    if not html:
+        return html
+
+    def _replace(m: re.Match) -> str:
+        raw = m.group(0)
+        if not _is_bold_adjacent(html, m.start()):
+            return raw
+        inner_plain = re.sub(r"<[^>]+>", "", raw)
+        parsed = _split_label_and_date(inner_plain)
+        if parsed is None:
+            return raw
+        label, date_part = parsed
+        colour = _STATUS_LABEL_COLOURS[label]
+        title = f"{label}({date_part})" if date_part else label
+        macro = (
+            '<ac:structured-macro ac:name="status">'
+            f'<ac:parameter ac:name="title">{title}</ac:parameter>'
+            f'<ac:parameter ac:name="colour">{colour}</ac:parameter>'
+            "</ac:structured-macro>"
+        )
+        # 매칭 구간 안의 <strong>/</strong> 개수가 안 맞으면(볼드 경계가 구간 중간에서
+        # 열리거나 닫히는 실데이터 패턴) 구간 밖의 짝을 잃게 되므로 균형을 다시 맞춰줌:
+        # 닫힘이 더 많으면(구간 밖에서 열린 것을 구간 안에서 닫음) 매크로 앞에 </strong> 보강,
+        # 열림이 더 많으면(구간 안에서 열려 구간 밖에서 닫히는 것) 매크로 뒤에 <strong> 보강.
+        opens = len(re.findall(r"<strong\s*>", raw, re.IGNORECASE))
+        closes = len(re.findall(r"</strong\s*>", raw, re.IGNORECASE))
+        net = opens - closes
+        if net < 0:
+            return "</strong>" * (-net) + macro
+        if net > 0:
+            return macro + "<strong>" * net
+        return macro
+
+    return _PAREN_WITH_INLINE_TAGS_RE.sub(_replace, html)
 
 # ---------------------------------------------------------------------------
 # 보조 함수

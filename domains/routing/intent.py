@@ -16,6 +16,7 @@ VALID_INTENTS = frozenset(
         "schedule_management",
         "weekly_report_draft",
         "weekly_meeting",
+        "weekly_page_create",
         "settings",
         "home_menu",
     }
@@ -54,10 +55,17 @@ schedule_management — 회의실·캘린더 예약·빈 시간 찾기 기능 �
 weekly_report_draft — '주간보고 초안' 기능 직접 호출(작성/받기)만
   YES: "주간보고 초안 받기", "주간보고초안"
   NO: "주간보고 내용 알려줘"(daily_chat), "최신 주간보고 페이지 찾아서 요약"(agent)
+  NO: "ERP2팀 주간보고페이지 만들어줘"(weekly_page_create)
+
+weekly_page_create — 팀 주간회의/보고 Confluence 페이지를 새로 만들거나 생성
+  YES: "ERP2팀 주간보고페이지 만들어줘", "PC2팀 주간회의 페이지 생성해줘"
+  NO: "주간보고초안"(weekly_report_draft), "주간회의 페이지 찾아서 요약"(agent)
+  NO: "주간회의 팀 등록"(weekly_meeting)
 
 weekly_meeting — 주간회의 메뉴·팀/인원 등록·주간업무 설정
   YES: "주간회의 팀 등록", "인원 등록해줘", "주간업무 설정"
   NO: "주간회의 페이지 찾아서 요약"(agent), "주간보고 페이지 요약"(agent)
+  NO: "주간회의 페이지 만들어줘"(weekly_page_create)
 
 settings — 앱 설정·내 데이터 연결·OAuth (기능 메뉴 진입)
   YES: "설정", "내 데이터 연결"
@@ -240,6 +248,7 @@ def _deterministic_label(msg: str, ctx_block: str) -> tuple[str, str] | None:
         looks_like_schedule_booking,
         looks_like_vacation_query,
         looks_like_weekly_meeting_setup,
+        looks_like_weekly_page_create,
     )
 
     fast = _explicit_intent_fastpath(msg)
@@ -249,6 +258,9 @@ def _deterministic_label(msg: str, ctx_block: str) -> tuple[str, str] | None:
         return "home_menu", "exact_home_greeting"
     if not (ctx_block or "").strip() and looks_like_home_greeting(msg):
         return "home_menu", "home_greeting"
+    # agent(요약/찾기)보다 먼저 — "주간페이지 만들어줘"가 agent 로 가지 않게 함
+    if looks_like_weekly_page_create(msg):
+        return "weekly_page_create", "weekly_page_create_fastpath"
     if looks_like_agent_task(msg):
         return "agent", "agent_pattern"
     # 개인 일정 요약·휴가 조회는 agent(list_calendar_events/lookup_team_vacation)로 — daily_chat 거부 방지.
