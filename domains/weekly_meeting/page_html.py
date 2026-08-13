@@ -409,15 +409,15 @@ def fill_schedule_table_vacations(
             return m.group(0)
         data = category_map[category_key]
         new_inner = inner
-        next_html = data.get("next_week") or ""
-        this_html = data.get("this_week") or ""
+        # 이번 주/다음 주 이벤트가 없으면 빈 문단으로 명시적으로 비움 — 그대로 두면
+        # 몇 주 전 이벤트가 안 지워지고 계속 남아있게 됨(과거 실데이터에서 확인된 버그).
+        next_html = data.get("next_week") or "<p></p>"
+        this_html = data.get("this_week") or "<p></p>"
         # 끝에서부터 교체해야 앞 셀 오프셋이 유지됨
-        if next_html:
-            c3 = cells[2]
-            new_inner = new_inner[: c3.start(2)] + next_html + new_inner[c3.end(2) :]
-        if this_html:
-            c2 = cells[1]
-            new_inner = new_inner[: c2.start(2)] + this_html + new_inner[c2.end(2) :]
+        c3 = cells[2]
+        new_inner = new_inner[: c3.start(2)] + next_html + new_inner[c3.end(2) :]
+        c2 = cells[1]
+        new_inner = new_inner[: c2.start(2)] + this_html + new_inner[c2.end(2) :]
         return open_tr + new_inner + close_tr
 
     new_block = row_pat.sub(_replace_row, block)

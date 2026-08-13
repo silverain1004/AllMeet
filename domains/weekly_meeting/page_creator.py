@@ -534,17 +534,24 @@ def _build_vacation_map(
             logger.info("[vacation] 결과 %d건: %s", len(result_lines), result_lines)
 
     except Exception as exc:
+        # 조회/파싱 중 실패하면 acc가 일부만 채워진 상태일 수 있어, 이 상태로 반환하면
+        # "이번 주 실제로 없음"과 "조회 실패로 모름"을 구분할 수 없게 됨 — 표를 잘못
+        # 비우지 않도록 빈 dict 반환(호출 측에서 표를 건드리지 않음).
         logger.warning("[vacation] 일정 조회 실패: %s", exc)
+        return {}
 
     def _to_ul(lines: list[str]) -> str:
         return "<ul>" + "".join(f"<li>{ln}</li>" for ln in lines) + "</ul>" if lines else ""
 
+    # 조회에 성공했으면 4개 카테고리를 항상 포함(이벤트 없는 주는 빈 문자열) —
+    # 그래야 fill_schedule_table_vacations 가 "이번 주엔 없음"을 명시적으로 받아서
+    # 지난 주 데이터가 안 지워지고 남는 문제를 방지할 수 있음.
     result: dict[str, dict[str, str]] = {}
     for cat_key, weeks in acc.items():
-        this_ul = _to_ul(weeks["this_week"])
-        next_ul = _to_ul(weeks["next_week"])
-        if this_ul or next_ul:
-            result[cat_key] = {"this_week": this_ul, "next_week": next_ul}
+        result[cat_key] = {
+            "this_week": _to_ul(weeks["this_week"]),
+            "next_week": _to_ul(weeks["next_week"]),
+        }
     return result
 
 
