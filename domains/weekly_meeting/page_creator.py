@@ -938,6 +938,13 @@ def run_weekly_page_job(team_id: str) -> str:
     if not cfg:
         raise RuntimeError(f"팀 설정을 찾을 수 없습니다: {team_id}")
 
+    active_weekdays = cfg.get("weekly_active_weekdays")
+    if active_weekdays is not None:
+        today_weekday = datetime.now().weekday()  # Mon=0 ... Sun=6 (서버 로컬 시간 = KST 가정, 이 모듈의 기존 관례와 동일)
+        if today_weekday not in active_weekdays:
+            logger.info("[%s] 오늘(weekday=%s)은 실행 요일이 아니라 스킵", team_id, today_weekday)
+            return f"스킵: 오늘은 실행 요일이 아님 (weekday={today_weekday})"
+
     mode = str(cfg.get("weekly_page_mode") or "").strip()
     if not mode:
         # 신규 팀 추가 시 누락됐거나 구 문서 — MES2 와 동일하게 copy_latest 로 동작

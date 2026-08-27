@@ -95,3 +95,85 @@ def test_run_weekly_page_job_defaults_missing_mode_to_copy_latest():
     assert result == "copied"
     copy_fn.assert_called_once()
     tpl_fn.assert_not_called()
+
+
+def test_run_weekly_page_job_skips_on_inactive_weekday():
+    """weekly_active_weekdays 지정 팀(ERP2): 일요일(6) 외엔 스킵, Confluence 호출 없음."""
+    from datetime import datetime
+
+    from domains.weekly_meeting.page_creator import run_weekly_page_job
+
+    monday = datetime(2026, 8, 17)  # 월요일
+    assert monday.weekday() == 0
+
+    with patch(
+        "firestore.team_config.get_team_config",
+        return_value={
+            "team_name": "ERP2팀",
+            "weekly_page_mode": "copy_latest",
+            "weekly_active_weekdays": [6],  # 일요일만 활성
+        },
+    ), patch(
+        "firestore.team_config.normalize_team_id",
+        side_effect=lambda x: x,
+    ), patch(
+        "domains.weekly_meeting.page_creator.datetime"
+    ) as mock_dt, patch(
+        "domains.weekly_meeting.page_creator._create_by_copy"
+    ) as copy_fn:
+        mock_dt.now.return_value = monday
+        result = run_weekly_page_job("ERP2")
+
+    assert "스킵" in result
+    copy_fn.assert_not_called()
+
+
+def test_run_weekly_page_job_runs_on_active_weekday():
+    from datetime import datetime
+
+    from domains.weekly_meeting.page_creator import run_weekly_page_job
+
+    sunday = datetime(2026, 8, 16)
+    assert sunday.weekday() == 6
+
+    with patch(
+        "firestore.team_config.get_team_config",
+        return_value={
+            "team_name": "ERP2팀",
+            "weekly_page_mode": "copy_latest",
+            "weekly_active_weekdays": [6],
+        },
+    ), patch(
+        "firestore.team_config.normalize_team_id",
+        side_effect=lambda x: x,
+    ), patch(
+        "domains.weekly_meeting.page_creator.datetime"
+    ) as mock_dt, patch(
+        "domains.weekly_meeting.page_creator._create_by_copy",
+        return_value="copied",
+    ) as copy_fn:
+        mock_dt.now.return_value = sunday
+        result = run_weekly_page_job("ERP2")
+
+    assert result == "copied"
+    copy_fn.assert_called_once()
+
+
+def test_run_weekly_page_job_no_weekday_gate_when_unset():
+    """weekly_active_weekdays 미설정 팀(MES2/PC2 등): 요일 상관없이 항상 실행."""
+    from domains.weekly_meeting.page_creator import run_weekly_page_job
+
+    with patch(
+        "firestore.team_config.get_team_config",
+        return_value={"team_name": "MES2팀", "weekly_page_mode": "copy_latest"},
+    ), patch(
+        "firestore.team_config.normalize_team_id",
+        side_effect=lambda x: x,
+    ), patch(
+        "domains.weekly_meeting.page_creator._create_by_copy",
+        return_value="copied",
+    ) as copy_fn:
+        result = run_weekly_page_job("MES2")
+
+    assert result == "copied"
+    copy_fn.assert_called_once()
