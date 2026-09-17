@@ -34,3 +34,5 @@ USER_GUIDE.md
 WR_CHECKLIST.md
 PLAN.md
 NOTION_권한_및_데이터흐름.md
+# Claude Code 로컬 전용 설정 (권한 허용 목록 — 사람마다 다름)
+.claude/settings.local.json
