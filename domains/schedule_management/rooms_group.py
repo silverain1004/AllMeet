@@ -123,23 +123,20 @@ def _range_label(start_raw: str, end_raw: str) -> str:
     return f"{s.strftime('%H:%M')}~{e.strftime('%H:%M')}"
 
 
-def format_group_booking_summary(
+def build_room_booking_reasons(
     bookings: list[dict[str, Any]],
     rooms: list[dict[str, Any]],
     *,
     time_min_iso: str,
     time_max_iso: str,
-    max_lines: int = 3,
     room_busy: dict[str, list[dict[str, str]]] | None = None,
-) -> str:
-    """선택 구간의 회의실 예약 현황 한 줄 요약.
+) -> dict[str, str]:
+    """회의실별 "왜 막혔는지" 한 줄 — 카드의 회의실 행에 그대로 붙는다.
 
-    집계 캘린더 이벤트뿐 아니라 ``room_busy`` (회의실 리소스 캘린더 freebusy) 로만
-    확인되는 직접 예약도 포함한다. 예전에는 집계 캘린더만 읽어서, 카드에 "사용 중"
-    으로 표시된 회의실이 요약에는 빠지는 불일치가 있었다.
+    집계 캘린더 예약은 제목까지 알 수 있고, 리소스 캘린더 freebusy 로만 확인되는
+    직접 예약은 시간만 알 수 있다. 한 회의실에 여러 건이면 첫 건만 쓰고 접는다.
     """
-    entries: list[str] = []
-    covered: set[str] = set()
+    entries: dict[str, list[str]] = {}
 
     for event in bookings:
         start = str(event.get("start") or "")
@@ -147,21 +144,16 @@ def format_group_booking_summary(
         if not _interval_overlaps(start, end, time_min_iso=time_min_iso, time_max_iso=time_max_iso):
             continue
         when = _range_label(start, end)
-        summary = str(event.get("summary") or "(제목 없음)")
-        matched = match_booking_to_rooms(event, rooms)
-        if not matched:
-            entries.append(f"{str(event.get('location') or '회의실')} {when} {summary}")
-            continue
-        # 한 회의가 회의실 여러 개를 잡았으면 회의실 수만큼 줄이 나가야 카드의 빨간불 개수와 맞는다.
-        for room in matched:
+        summary = str(event.get("summary") or "").strip() or "(제목 없음)"
+        for room in match_booking_to_rooms(event, rooms):
             rid = str(room.get("calendar_resource_id") or "").strip()
             if rid:
-                covered.add(rid)
-            entries.append(f"{str(room.get('name') or '회의실')} {when} {summary}")
+                entries.setdefault(rid, []).append(f"{when} {summary}")
 
     for room in rooms:
         rid = str(room.get("calendar_resource_id") or "").strip()
-        if not rid or rid in covered:
+        # 집계 캘린더로 이미 제목까지 안 회의실은 freebusy 를 겹쳐 세지 않는다.
+        if not rid or rid in entries:
             continue
         for span in (room_busy or {}).get(rid) or []:
             start = str(span.get("start") or "")
@@ -170,14 +162,10 @@ def format_group_booking_summary(
                 start, end, time_min_iso=time_min_iso, time_max_iso=time_max_iso
             ):
                 continue
-            covered.add(rid)
-            when = _range_label(start, end)
-            # freebusy 는 제목을 주지 않는다 — 집계 캘린더에 없는 직접 예약.
-            entries.append(f"{str(room.get('name') or '회의실')} {when} (예약됨)")
+            entries.setdefault(rid, []).append(f"{_range_label(start, end)} (예약됨)")
 
-    if not entries:
-        return ""
-    lines = entries[:max_lines]
-    extra = len(entries) - len(lines)
-    suffix = f" 외 {extra}건" if extra > 0 else ""
-    return "군산 예약 현황: " + " | ".join(lines) + suffix
+    reasons: dict[str, str] = {}
+    for rid, lines in entries.items():
+        extra = len(lines) - 1
+        reasons[rid] = lines[0] + (f" 외 {extra}건" if extra > 0 else "")
+    return reasons

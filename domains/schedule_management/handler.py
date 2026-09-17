@@ -51,7 +51,7 @@ from domains.schedule_management.room_calendar_store import (
     get_room_calendar_config,
     update_room_calendar_config,
 )
-from domains.schedule_management.rooms import get_group_booking_summary, recommend_rooms
+from domains.schedule_management.rooms import recommend_rooms
 from domains.schedule_management.rooms_store import get_rooms
 from domains.schedule_management.rooms_store import get_rooms
 from domains.schedule_management.rooms_sync import sync_resource_rooms_from_calendar_list
@@ -290,7 +290,6 @@ def _render_compose(
     snapshot = None
     conflict_check: ConflictCheckResult | None = None
     rooms: list[dict[str, Any]] = []
-    group_summary = ""
     if preview_ready:
         if access and can_fetch_compose_snapshot(state):
             snapshot = fetch_compose_snapshot(
@@ -321,12 +320,6 @@ def _render_compose(
             snapshot=snapshot,
             rooms=room_list,
         )
-        group_summary = get_group_booking_summary(
-            state,
-            access_token=access,
-            snapshot=snapshot,
-            rooms=room_list,
-        )
     return build_compose_card(
         state,
         calendar_options=_calendar_options(chat_event, linked=linked),
@@ -335,7 +328,6 @@ def _render_compose(
         pending_candidates=pending_candidates,
         oauth_linked=linked,
         oauth_url=_oauth_url(chat_event),
-        group_booking_summary=group_summary,
         conflict_check=conflict_check,
         room_preview_ready=preview_ready,
         include_action_response=include_action_response,

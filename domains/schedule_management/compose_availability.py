@@ -29,6 +29,10 @@ _part_cache: dict[str, dict[tuple[Any, ...], tuple[float, Any]]] = {
     "people_busy": {},
     "group_bookings": {},
     "booker_events": {},
+    # 대안 시간 탐색용 하루치 조회 — 충돌 화면은 참석자·회의실을 바꿔가며
+    # 여러 번 렌더되는데, 그때마다 업무시간 전체를 다시 칠 이유가 없다.
+    "day_people_busy": {},
+    "day_room_busy": {},
 }
 _part_lock = threading.Lock()
 
@@ -44,6 +48,11 @@ def _part_get(part: str, key: tuple[Any, ...]) -> tuple[bool, Any]:
 def _part_put(part: str, key: tuple[Any, ...], value: Any) -> None:
     with _part_lock:
         _part_cache[part][key] = (time.monotonic(), value)
+
+
+# 다른 모듈(대안 시간 탐색)도 같은 TTL 캐시를 쓰도록 공개한다.
+part_cache_get = _part_get
+part_cache_put = _part_put
 
 
 @dataclass

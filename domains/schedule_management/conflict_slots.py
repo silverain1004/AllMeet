@@ -8,7 +8,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from domains.schedule_management.calendar_client import KST, freebusy_query, list_events, to_kst_iso
-from domains.schedule_management.compose_availability import ComposeCalendarSnapshot
+from domains.schedule_management.compose_availability import (
+    ComposeCalendarSnapshot,
+    part_cache_get,
+    part_cache_put,
+)
 from domains.schedule_management.compose_state import (
     BUSINESS_HOUR_END,
     BUSINESS_HOUR_START,
@@ -439,17 +443,30 @@ def suggest_alternative_slots(
             people_ids.append(email)
     group_enabled = bool(get_room_calendar_config().get("group_calendar_id"))
 
-    def _fetch_people() -> dict[str, list[dict[str, str]]]:
-        return _freebusy_chunked(
-            people_ids, time_min=day_start_iso, time_max=day_end_iso, access_token=access_token
+    def _day_busy(
+        part: str,
+        calendar_ids: list[str],
+    ) -> dict[str, list[dict[str, str]]]:
+        if not calendar_ids:
+            return {}
+        key = (date, tuple(sorted(c.lower() for c in calendar_ids)))
+        hit, cached = part_cache_get(part, key)
+        if hit:
+            return cached
+        busy = _freebusy_chunked(
+            calendar_ids, time_min=day_start_iso, time_max=day_end_iso, access_token=access_token
         )
+        # 일부만 응답한 조회를 캐시하면 빠진 캘린더가 45초 동안 "비어 있음"으로
+        # 보여 실제로는 겹치는 시간을 추천하게 된다. 완전한 결과만 캐시한다.
+        if set(busy) >= set(calendar_ids):
+            part_cache_put(part, key, busy)
+        return busy
+
+    def _fetch_people() -> dict[str, list[dict[str, str]]]:
+        return _day_busy("day_people_busy", people_ids)
 
     def _fetch_rooms() -> dict[str, list[dict[str, str]]]:
-        if not resource_ids:
-            return {}
-        return _freebusy_chunked(
-            resource_ids, time_min=day_start_iso, time_max=day_end_iso, access_token=access_token
-        )
+        return _day_busy("day_room_busy", resource_ids)
 
     def _fetch_group() -> list[dict[str, Any]]:
         if not group_enabled:
@@ -559,7 +576,9 @@ def check_schedule_conflicts(
         conflicts=conflicts,
         requested_time=requested_time,
     )
-    if conflicts and mode == "full":
+    # 간편예약(light) 단계가 기본 화면이라, 여기서 대안을 빼면 사용자는 충돌 문구만 본다.
+    # 대안 탐색은 후보 수와 무관한 상수 회차라 light 에서도 감당된다.
+    if conflicts:
         result.alternatives = suggest_alternative_slots(
             state,
             access_token=access_token,

@@ -16,8 +16,8 @@ from domains.schedule_management.calendar_client import (
 )
 from domains.schedule_management.room_calendar_store import get_room_calendar_config
 from domains.schedule_management.rooms_group import (
+    build_room_booking_reasons,
     busy_resource_ids_from_group_bookings,
-    format_group_booking_summary,
     list_group_room_bookings,
 )
 from domains.schedule_management.rooms_store import get_rooms
@@ -277,6 +277,7 @@ def recommend_rooms(
     room_list = rooms if rooms is not None else get_rooms()
     ordered = ordered_rooms_for_state(state, room_list)
     attendee_count = _attendee_count_for_state(state)
+    reasons: dict[str, str] = {}
 
     if snapshot:
         try:
@@ -289,6 +290,13 @@ def recommend_rooms(
                 ordered,
                 time_min_iso=start_iso,
                 time_max_iso=end_iso,
+            )
+            reasons = build_room_booking_reasons(
+                group_bookings,
+                ordered,
+                time_min_iso=start_iso,
+                time_max_iso=end_iso,
+                room_busy=busy_map,
             )
             t0 = datetime.fromisoformat(start_iso).astimezone(KST)
             t1 = datetime.fromisoformat(end_iso).astimezone(KST)
@@ -372,6 +380,13 @@ def recommend_rooms(
                         time_min_iso=start_iso,
                         time_max_iso=end_iso,
                     )
+                reasons = build_room_booking_reasons(
+                    group_bookings,
+                    ordered,
+                    time_min_iso=start_iso,
+                    time_max_iso=end_iso,
+                    room_busy=busy_map,
+                )
                 t0 = datetime.fromisoformat(start_iso).astimezone(KST)
                 t1 = datetime.fromisoformat(end_iso).astimezone(KST)
 
@@ -408,6 +423,9 @@ def recommend_rooms(
     for room in ordered[:max_n]:
         row = dict(room)
         row["display_line"] = f"수용 {room.get('capacity', 0)}명 | {_room_equipment_line(room)}"
+        rid = str(room.get("calendar_resource_id") or "").strip()
+        if rid and reasons.get(rid):
+            row["busy_reason"] = reasons[rid]
         if row.get("show_availability"):
             avail = str(row.get("availability") or "")
             if avail == "busy":
@@ -422,51 +440,3 @@ def recommend_rooms(
             row["show_availability"] = False
         out.append(row)
     return out
-
-
-def get_group_booking_summary(
-    state: dict[str, Any],
-    *,
-    access_token: str | None = None,
-    snapshot: ComposeCalendarSnapshot | None = None,  # noqa: F821
-    rooms: list[dict[str, Any]] | None = None,
-) -> str:
-    """선택 일시 기준 회의실 예약 요약 (집계 캘린더 + 리소스 캘린더 직접 예약)."""
-    group_enabled = bool(get_room_calendar_config().get("group_calendar_id"))
-    room_list = rooms if rooms is not None else get_rooms()
-    room_busy: dict[str, list[dict[str, str]]] = {}
-    if snapshot:
-        bookings = snapshot.group_bookings
-        room_busy = snapshot.room_busy
-        start_iso = snapshot.start_iso
-        end_iso = snapshot.end_iso
-    else:
-        if not group_enabled:
-            return ""
-        date = str(state.get("meeting_date") or "").strip()
-        time_str = str(state.get("meeting_time") or "").strip()
-        if not date or not time_str:
-            return ""
-        try:
-            duration = int(state.get("duration_minutes") or 60)
-            start_iso = to_kst_iso(date, time_str)
-            end_dt = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M") + timedelta(
-                minutes=duration
-            )
-            end_iso = end_dt.replace(tzinfo=KST).isoformat()
-        except ValueError:
-            return ""
-        bookings = list_group_room_bookings(
-            time_min=start_iso,
-            time_max=end_iso,
-            access_token=access_token,
-        )
-    if not bookings and not room_busy:
-        return ""
-    return format_group_booking_summary(
-        bookings,
-        room_list,
-        time_min_iso=start_iso,
-        time_max_iso=end_iso,
-        room_busy=room_busy,
-    )

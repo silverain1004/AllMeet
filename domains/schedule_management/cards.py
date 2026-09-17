@@ -1175,6 +1175,9 @@ def _room_widgets(
 
         is_busy = str(room.get("availability") or "") == "busy"
 
+        # 왜 막혔는지는 방 이름 옆에 붙어야 읽힌다 — 카드 위 별도 요약 문단을 대신한다.
+        reason = str(room.get("busy_reason") or "").strip()
+
         widgets.append(
 
             {
@@ -1184,6 +1187,8 @@ def _room_widgets(
                     "topLabel": top_label,
 
                     "text": line,
+
+                    **({"bottomLabel": html.escape(reason)} if reason else {}),
 
                     "wrapText": True,
 
@@ -1287,6 +1292,19 @@ def _conflict_widgets(
             )
         widgets.append({"buttonList": {"buttons": alt_buttons}})
 
+    else:
+        # 대안이 없을 때 충돌 문구만 남기면 "그래서 언제 잡으라는 건지" 를 알 수 없다.
+        widgets.append(
+            {
+                "textParagraph": {
+                    "text": (
+                        f"{BUSINESS_HOUR_START}~{BUSINESS_HOUR_END} 사이에는 "
+                        "참석자와 회의실이 모두 되는 시간이 없습니다"
+                    )
+                }
+            }
+        )
+
     requested = html.escape(str(conflict_check.requested_time or state.get("meeting_time") or ""))
     keep_params = dict(base_params)
     keep_params["ignore_conflict"] = "1"
@@ -1319,7 +1337,6 @@ def build_quick_compose_card(
 
     recommended_rooms: list[dict[str, Any]],
 
-    group_booking_summary: str = "",
 
     conflict_check: Any = None,
 
@@ -1348,10 +1365,6 @@ def build_quick_compose_card(
     widgets.append(_duration_radio_widget(state, base_params))
 
 
-
-    if group_booking_summary:
-
-        widgets.append({"textParagraph": {"text": html.escape(group_booking_summary)}})
 
 
 
@@ -1776,7 +1789,6 @@ def build_compose_card(
 
     oauth_url: str = "",
 
-    group_booking_summary: str = "",
 
     conflict_check: Any = None,
 
@@ -1814,7 +1826,6 @@ def build_compose_card(
 
         recommended_rooms=recommended_rooms,
 
-        group_booking_summary=group_booking_summary,
 
         conflict_check=conflict_check,
 
