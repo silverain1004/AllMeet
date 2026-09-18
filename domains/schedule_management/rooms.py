@@ -46,6 +46,14 @@ def _room_equipment_line(room: dict[str, Any]) -> str:
     return ", ".join(equipment) if equipment else "장비 정보 없음"
 
 
+def filter_rooms_by_office(rooms: list[dict[str, Any]], office: str) -> list[dict[str, Any]]:
+    """office가 비어 있으면 전체(모든 근무지)를 그대로 반환."""
+    office = (office or "").strip()
+    if not office:
+        return list(rooms)
+    return [r for r in rooms if str(r.get("office") or "gunsan").strip() == office]
+
+
 def _attendee_count_for_state(state: dict[str, Any]) -> int:
     attendees = state.get("attendees") or []
     explicit = state.get("attendee_count")

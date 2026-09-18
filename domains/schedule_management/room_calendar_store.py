@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from domains.schedule_management.gunsan_rooms import GUNSAN_ROOM_CATALOG
+from domains.schedule_management.seoul_rooms import SEOUL_ROOM_CATALOG
 from firestore.writes import get_client
 
 _CONFIG_COLLECTION = "config"
@@ -22,12 +23,14 @@ _GUNSAN_GROUP_CALENDAR_ID = (
     "@group.calendar.google.com"
 )
 
+_ALL_ROOM_CATALOG: list[dict[str, Any]] = list(SEOUL_ROOM_CATALOG) + list(GUNSAN_ROOM_CATALOG)
+
 _DEFAULT: dict[str, Any] = {
     "group_calendar_id": _GUNSAN_GROUP_CALENDAR_ID,
     "group_calendar_name": "군산 회의실 예약",
     "sync_name_filter": "군산",
-    "room_resource_ids": [r["calendar_resource_id"] for r in GUNSAN_ROOM_CATALOG],
-    "room_catalog": GUNSAN_ROOM_CATALOG,
+    "room_resource_ids": [r["calendar_resource_id"] for r in _ALL_ROOM_CATALOG],
+    "room_catalog": _ALL_ROOM_CATALOG,
     "impersonate_email": "",
 }
 
@@ -49,10 +52,10 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         impersonate = os.environ.get("GOOGLE_CALENDAR_IMPERSONATE_EMAIL", "").strip()
     resource_ids = _parse_resource_ids(data.get("room_resource_ids"))
     if not resource_ids:
-        resource_ids = [r["calendar_resource_id"] for r in GUNSAN_ROOM_CATALOG]
+        resource_ids = [r["calendar_resource_id"] for r in _ALL_ROOM_CATALOG]
     catalog = data.get("room_catalog")
     if not isinstance(catalog, list) or not catalog:
-        catalog = GUNSAN_ROOM_CATALOG
+        catalog = _ALL_ROOM_CATALOG
     return {
         "group_calendar_id": group_id,
         "group_calendar_name": str(data.get("group_calendar_name") or "군산 회의실 예약").strip(),

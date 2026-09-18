@@ -10,12 +10,16 @@ from domains.schedule_management.gunsan_rooms import (
     catalog_entry_to_room,
     gunsan_rooms_from_catalog,
 )
+from domains.schedule_management.seoul_rooms import (
+    SEOUL_ROOM_CATALOG,
+    seoul_rooms_from_catalog,
+)
 from firestore.writes import get_client
 
 _CONFIG_COLLECTION = "config"
 _ROOMS_DOC = "rooms"
 
-_DUMMY_ROOMS: list[dict[str, Any]] = gunsan_rooms_from_catalog()
+_DUMMY_ROOMS: list[dict[str, Any]] = seoul_rooms_from_catalog() + gunsan_rooms_from_catalog()
 _ROOMS_CACHE: tuple[float, list[dict[str, Any]]] | None = None
 _ROOMS_TTL_SEC = 120
 
@@ -33,19 +37,24 @@ def _normalize_room(row: dict[str, Any]) -> dict[str, Any]:
         "equipment": [str(x).strip() for x in equipment if str(x).strip()],
         "calendar_resource_id": str(row.get("calendar_resource_id") or "").strip(),
         "location": str(row.get("location") or "").strip(),
+        "office": str(row.get("office") or "gunsan").strip(),
         "default_priority": int(row.get("default_priority") or 0),
     }
 
 
 def _catalog_by_resource_id() -> dict[str, dict[str, Any]]:
+    entries = list(GUNSAN_ROOM_CATALOG) + list(SEOUL_ROOM_CATALOG)
     return {
         str(e.get("calendar_resource_id") or "").strip(): catalog_entry_to_room(e)
-        for e in GUNSAN_ROOM_CATALOG
+        for e in entries
         if str(e.get("calendar_resource_id") or "").strip()
     }
 
 
 def _enrich_with_catalog(rooms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Firestore에 저장된 회의실 이름/수용인원/사무실 구분이 낡았어도, 하드코딩된
+    카탈로그(calendar_resource_id 매칭)로 항상 최신 표시명·인원·office를 덮어써
+    운영 문서를 수동 정정하지 않아도 되게 한다."""
     by_id = _catalog_by_resource_id()
     out: list[dict[str, Any]] = []
     for room in rooms:
@@ -58,6 +67,12 @@ def _enrich_with_catalog(rooms: list[dict[str, Any]]) -> list[dict[str, Any]]:
             equipment = row.get("equipment") or []
             if not equipment or equipment == ["회의실"]:
                 row["equipment"] = catalog.get("equipment") or equipment
+            if catalog.get("capacity"):
+                row["capacity"] = catalog["capacity"]
+            if catalog.get("office"):
+                row["office"] = catalog["office"]
+            if catalog.get("location") and not row.get("location"):
+                row["location"] = catalog["location"]
         out.append(row)
     return out
 

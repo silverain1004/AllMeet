@@ -78,7 +78,9 @@ def test_ag_delegate_auto_runs_in_background_with_space():
     from domains.agent import actions
 
     chat_event = {"type": "CARD_CLICKED", "space": {"name": "spaces/AAA"}}
-    with patch.object(actions, "handle_agent_request") as mock_req, patch(
+    with patch.object(actions, "agent_ui_enabled", return_value=True), patch.object(
+        actions, "handle_agent_request"
+    ) as mock_req, patch(
         "api.chat.loading.start_background"
     ) as mock_bg, patch("api.chat.loading.loading_text", return_value={"text": "⏳"}):
         out = actions.handle_agent_action(
@@ -96,7 +98,9 @@ def test_ag_delegate_without_space_falls_back_to_request():
     from domains.agent import actions
 
     chat_event = {"type": "CARD_CLICKED"}  # space 없음 → 동기 폴백
-    with patch.object(actions, "handle_agent_request", return_value={"text": "계획 카드"}) as mock_req:
+    with patch.object(actions, "agent_ui_enabled", return_value=True), patch.object(
+        actions, "handle_agent_request", return_value={"text": "계획 카드"}
+    ) as mock_req:
         out = actions.handle_agent_action(
             invoked_function="ag_delegate",
             parameters={"user_message": "회의 잡아줘"},
@@ -106,12 +110,73 @@ def test_ag_delegate_without_space_falls_back_to_request():
     assert out == {"text": "계획 카드"}
 
 
-def test_ag_delegate_empty_message_asks_again():
+def test_agent_ui_disabled_by_default():
+    from domains.agent.config import agent_ui_enabled
+
+    assert agent_ui_enabled() is False
+
+
+def test_agent_ui_enabled_via_env(monkeypatch):
+    from domains.agent.config import agent_ui_enabled
+
+    monkeypatch.setenv("AGENT_UI_ENABLED", "true")
+    assert agent_ui_enabled() is True
+
+
+def test_cta_button_grayed_out_when_disabled():
+    from domains.agent.cards import build_agent_cta_card
+
+    cta = build_agent_cta_card(
+        user_message="회의 잡아줘",
+        intent_value="schedule_management",
+        outline=["a", "b"],
+        label="🤖 AI에게 맡기기",
+    )
+    btn = _delegate_button(cta)
+    assert btn.get("disabled") is True
+    assert "준비 중" in btn["text"]
+
+
+def test_cta_button_active_when_enabled(monkeypatch):
+    monkeypatch.setenv("AGENT_UI_ENABLED", "true")
+    from domains.agent.cards import build_agent_cta_card
+
+    cta = build_agent_cta_card(
+        user_message="회의 잡아줘",
+        intent_value="schedule_management",
+        outline=["a", "b"],
+        label="🤖 AI에게 맡기기",
+    )
+    btn = _delegate_button(cta)
+    assert not btn.get("disabled")
+    assert btn["text"] == "🤖 AI에게 맡기기"
+
+
+def test_handle_agent_request_disabled_by_default_returns_notice():
+    from domains.agent.actions import handle_agent_request
+
+    out = handle_agent_request("복잡한 요청", chat_event={"user": {"email": "u@x.com"}})
+    assert "준비 중" in out["text"]
+
+
+def test_handle_agent_action_disabled_blocks_approve():
     from domains.agent import actions
 
     out = actions.handle_agent_action(
-        invoked_function="ag_delegate",
-        parameters={"user_message": ""},
+        invoked_function="ag_approve",
+        parameters={"plan_id": "PID-1"},
         chat_event={"space": {"name": "spaces/AAA"}},
     )
+    assert "준비 중" in out["text"]
+
+
+def test_ag_delegate_empty_message_asks_again():
+    from domains.agent import actions
+
+    with patch.object(actions, "agent_ui_enabled", return_value=True):
+        out = actions.handle_agent_action(
+            invoked_function="ag_delegate",
+            parameters={"user_message": ""},
+            chat_event={"space": {"name": "spaces/AAA"}},
+        )
     assert "다시" in out["text"]

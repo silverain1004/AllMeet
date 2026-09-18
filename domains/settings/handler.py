@@ -186,10 +186,14 @@ def handle_settings_action(
     if fn == "st_open_rooms":
         return build_room_region_card(include_action_response=True)
 
-    if fn == "st_rooms_view_gunsan":
+    if fn in ("st_rooms_view_gunsan", "st_rooms_view_seoul"):
+        from domains.schedule_management.rooms import filter_rooms_by_office
         from domains.schedule_management.rooms_store import get_rooms
 
-        return build_room_list_card(get_rooms(), region_label="군산", include_action_response=True)
+        office = "gunsan" if fn == "st_rooms_view_gunsan" else "seoul"
+        region_label = "군산" if office == "gunsan" else "서울"
+        rooms = filter_rooms_by_office(get_rooms(), office)
+        return build_room_list_card(rooms, region_label=region_label, include_action_response=True)
 
     if fn == "st_open_team":
         ctx = parse_team_context(parameters=parameters, form_inputs=form_inputs, teams=teams)

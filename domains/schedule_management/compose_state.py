@@ -30,6 +30,7 @@ def empty_compose_state() -> dict[str, Any]:
         "want_meet": False,
         "picked_room_id": "",
         "picked_room_name": "",
+        "room_region": "",
         "equipment_keywords": [],
         "location_keyword": "",
         "room_name_keyword": "",
@@ -137,6 +138,7 @@ def state_to_button_params(state: dict[str, Any]) -> dict[str, str]:
         "want_meet": "1" if state.get("want_meet") or state.get("auto_meet") else "",
         "picked_room_id": str(state.get("picked_room_id") or ""),
         "picked_room_name": str(state.get("picked_room_name") or ""),
+        "room_region": str(state.get("room_region") or ""),
         "title": str(state.get("title") or ""),
         "equipment_keywords": ",".join(state.get("equipment_keywords") or []),
         "location_keyword": str(state.get("location_keyword") or ""),
@@ -216,6 +218,7 @@ def compose_state_from(
     state["ignore_conflict"] = parameters.get("ignore_conflict", "") in ("1", "true", "yes")
     state["picked_room_id"] = parameters.get("picked_room_id", "")
     state["picked_room_name"] = parameters.get("picked_room_name", "")
+    state["room_region"] = parameters.get("room_region", "")
     pipe = parameters.get("attendees_pipe", "")
     state["attendees"] = deserialize_attendees(pipe)
     eq = parameters.get("equipment_keywords", "")

@@ -51,10 +51,10 @@ from domains.schedule_management.room_calendar_store import (
     get_room_calendar_config,
     update_room_calendar_config,
 )
-from domains.schedule_management.rooms import recommend_rooms
-from domains.schedule_management.rooms_store import get_rooms
+from domains.schedule_management.rooms import filter_rooms_by_office, recommend_rooms
 from domains.schedule_management.rooms_store import get_rooms
 from domains.schedule_management.rooms_sync import sync_resource_rooms_from_calendar_list
+from domains.schedule_management.working_location import detect_office_for_date
 from domains.weekly_meeting.oauth_callback import build_authorization_url, encode_state
 from firestore.team_config import (
     get_all_members,
@@ -202,6 +202,23 @@ def _find_member_matches(query: str, members: list[dict[str, Any]]) -> list[dict
     return matches
 
 
+def _resolve_room_region(state: dict[str, Any], email: str) -> tuple[str, str]:
+    """(office_filter, active_ui_value).
+
+    office_filter == "" 이면 전체(군산+서울) 노출. 사용자가 지역 버튼으로 명시
+    선택했으면 그 값을 쓰고, 아니면 Google Calendar '근무 위치' 이벤트로 회의 날짜의
+    근무지를 자동 판별한다. 근무 위치 미상이면 전체 노출.
+    """
+    explicit = str(state.get("room_region") or "").strip()
+    if explicit == "all":
+        return "", "all"
+    if explicit in ("gunsan", "seoul"):
+        return explicit, explicit
+    date = str(state.get("meeting_date") or "").strip() or datetime.now(KST).strftime("%Y-%m-%d")
+    detected = detect_office_for_date(email, date) if email else ""
+    return detected, (detected or "all")
+
+
 def _room_by_id(room_id: str) -> dict[str, Any] | None:
     rid = (room_id or "").strip()
     if not rid:
@@ -286,7 +303,8 @@ def _render_compose(
     step = str(state.get("compose_step") or "quick")
     conflict_mode = "light" if step == "quick" else "full"
     preview_ready = ready_for_quick_room_preview(state)
-    room_list = get_rooms()
+    region_filter, active_region = _resolve_room_region(state, email)
+    room_list = filter_rooms_by_office(get_rooms(), region_filter)
     snapshot = None
     conflict_check: ConflictCheckResult | None = None
     rooms: list[dict[str, Any]] = []
@@ -330,6 +348,7 @@ def _render_compose(
         oauth_url=_oauth_url(chat_event),
         conflict_check=conflict_check,
         room_preview_ready=preview_ready,
+        room_region_active=active_region,
         include_action_response=include_action_response,
     )
 
@@ -451,10 +470,14 @@ def handle_schedule_management(
 ) -> dict[str, Any]:
     # '회의실 뭐 있어/목록' 류는 예약 카드가 아니라 회의실 목록 카드를 보여준다.
     if _is_room_list_query(user_message):
-        from domains.schedule_management.rooms_store import get_rooms
         from domains.settings.cards import build_room_list_card
 
-        out = build_room_list_card(get_rooms(), region_label="군산")
+        email = _user_context(chat_event).get("email", "")
+        today = datetime.now(KST).strftime("%Y-%m-%d")
+        office = detect_office_for_date(email, today) if email else ""
+        rooms = filter_rooms_by_office(get_rooms(), office)
+        region_label = {"gunsan": "군산", "seoul": "서울"}.get(office, "전체")
+        out = build_room_list_card(rooms, region_label=region_label)
         out["text"] = "등록된 회의실 목록입니다."
         return out
 
@@ -541,7 +564,7 @@ def handle_schedule_management_action(
         )
         return {
             "actionResponse": {"type": "UPDATE_MESSAGE"},
-            "text": "✅ 군산 회의실 캘린더 설정을 저장했습니다.",
+            "text": "✅ 회의실 캘린더 설정을 저장했습니다.",
         }
 
     if invoked_function == "sm_open_compose":

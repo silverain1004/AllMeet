@@ -180,35 +180,64 @@ def build_oauth_link_card(
     intro: 맨 위에 덧붙일 안내 문구(HTML). 앱 추가 직후 '아직 연결 안 됨' 안내 등.
     """
     safe_email = html.escape(user_email)
-    widgets: list[dict[str, Any]] = []
+    top_widgets: list[dict[str, Any]] = []
     if intro:
-        widgets.append({"textParagraph": {"text": intro}})
-    widgets += [
+        top_widgets.append({"textParagraph": {"text": intro}})
+    top_widgets.append(
         {
             "textParagraph": {
                 "text": (
                     f"<b>{safe_email}</b> 의 Google Workspace 데이터를 AllMeet와 연결해요.<br>"
-                    "연결하면 아래 기능이 <b>내 실제 업무 데이터를 기반</b>으로 동작합니다."
                 )
             }
-        },
+        }
+    )
+    top_widgets.append(
+        {
+            "buttonList": {
+                "buttons": [
+                    {
+                        "text": "내 데이터 연결하기",
+                        "onClick": {"openLink": {"url": auth_url}},
+                    },
+                    {
+                        "text": "뒤로",
+                        "onClick": {"action": {"function": "hm_open_menu"}},
+                    },
+                ]
+            }
+        }
+    )
+
+    middle_widgets: list[dict[str, Any]] = [
         {
             "textParagraph": {
                 "text": (
-                    "<b>🔍 연결되는 범위</b><br>"
+                    '<font color="#888888">🔒 부여한 권한은 토큰으로 안전하게 보관돼요.<br>'
+                    "⚙️ 설정 → 개인설정에서 언제든 연결을 해제할 수 있어요.</font>"
+                )
+            }
+        },
+    ]
+
+    # 범위·활용처 설명은 길어서 기본 접힘 — header 를 눌러야 펼쳐진다. 맨 아래 배치.
+    detail_widgets: list[dict[str, Any]] = [
+        {
+            "textParagraph": {
+                "text": (
                     "• <b>Gmail</b> — 제목·발신자·날짜 등 메타데이터를 읽고, "
                     "<b>주간보고 초안·오늘의 할 일</b>을 만들 때는 관련 있는 일부 메일의 "
                     "<b>본문도 읽어요</b> (이 본문은 <b>나에게만</b> 보이는 초안에만 쓰이고 "
-                    "다른 동료에게 노출되지 않아요)<br>"
-                    "• <b>개인 Calendar</b> — 일정 조회 및 회의 예약<br>"
-                    "• <b>내 Drive</b> — 내가 만들거나 수정한 문서"
+                    "타인에게 노출되지 않아요)<br>"
+                    "• <b>Calendar</b> — 일정 조회 및 회의 예약<br>"
+                    "• <b>Drive</b> — 내가 만들거나 수정한 문서"
                 )
             }
         },
         {
             "textParagraph": {
                 "text": (
-                    "<b>📌 이런 곳에 쓰일 수 있어요</b> <font color=\"#888888\">(예시)</font><br>"
+                    "<b>📌 이런 곳에 쓰일 수 있어요</b><br>"
                     "• <b>주간보고 초안 · 오늘의 할 일</b> — 내 메일·문서·일정을 모아 "
                     "<b>나에게만</b> 보이는 초안을 만들어요.<br>"
                     "• <b>회의실 · 일정 검색</b> — 내 캘린더의 빈 시간을 찾아 예약을 도와요.<br>"
@@ -221,37 +250,31 @@ def build_oauth_link_card(
                 )
             }
         },
-        {
-            "textParagraph": {
-                "text": (
-                    '<font color="#888888">🔒 부여한 권한은 토큰으로 안전하게 보관돼요.<br>'
-                    "⚙️ 설정 → 개인설정에서 언제든 연결을 해제할 수 있어요.<br>"
-                    "아래 버튼을 누르면 Google 동의 화면이 열리고, 동의를 마치면 "
-                    "챗으로 자동 안내가 옵니다.</font>"
-                )
-            }
-        },
-        {
-            "buttonList": {
-                "buttons": [
-                    {
-                        "text": "🔗 Google 동의 페이지 열기",
-                        "onClick": {"openLink": {"url": auth_url}},
-                    },
-                    {
-                        "text": "뒤로",
-                        "onClick": {"action": {"function": "hm_open_menu"}},
-                    },
-                ]
-            }
-        },
     ]
-    return _wrap_card(
-        "wm_oauth_link",
-        {"title": "AllMeet", "subtitle": "내 데이터(GWS) 연결"},
-        widgets,
-        include_action_response=include_action_response,
-    )
+
+    out: dict[str, Any] = {
+        "cardsV2": [
+            {
+                "cardId": "wm_oauth_link",
+                "card": {
+                    "header": {"title": "AllMeet", "subtitle": "내 데이터(GWS) 연결"},
+                    "sections": [
+                        {"widgets": top_widgets},
+                        {"widgets": middle_widgets},
+                        {
+                            "header": "🔍 연결 범위·활용처 자세히 보기",
+                            "widgets": detail_widgets,
+                            "collapsible": True,
+                            "uncollapsibleWidgetsCount": 0,
+                        },
+                    ],
+                },
+            }
+        ],
+    }
+    if include_action_response:
+        out["actionResponse"] = {"type": "UPDATE_MESSAGE"}
+    return out
 
 
 def build_schedule_menu_card(teams: list[dict[str, str]], *, include_action_response: bool = False) -> dict[str, Any]:

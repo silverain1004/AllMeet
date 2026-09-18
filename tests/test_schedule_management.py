@@ -958,6 +958,140 @@ def test_gunsan_catalog_has_three_rooms_with_capacity():
     assert all(r["calendar_resource_id"].endswith("@resource.calendar.google.com") for r in rooms)
 
 
+def test_seoul_catalog_has_five_rooms_with_capacity():
+    from domains.schedule_management.seoul_rooms import seoul_rooms_from_catalog
+
+    rooms = seoul_rooms_from_catalog()
+    assert len(rooms) == 5
+    assert all(r["office"] == "seoul" for r in rooms)
+    caps = {r["display_name"]: r["capacity"] for r in rooms}
+    assert caps["Bali"] == 6
+    assert caps["Seoul"] == 20
+    assert caps["Hawaii"] == 6
+    assert caps["London"] == 8
+    assert caps["Paris"] == 6
+    assert all(r["calendar_resource_id"].endswith("@resource.calendar.google.com") for r in rooms)
+
+
+def test_gunsan_rooms_tagged_with_office():
+    from domains.schedule_management.gunsan_rooms import gunsan_rooms_from_catalog
+
+    rooms = gunsan_rooms_from_catalog()
+    assert all(r["office"] == "gunsan" for r in rooms)
+
+
+def test_dummy_rooms_include_both_offices():
+    from domains.schedule_management.rooms_store import _DUMMY_ROOMS
+
+    offices = {r["office"] for r in _DUMMY_ROOMS}
+    assert offices == {"gunsan", "seoul"}
+    assert len(_DUMMY_ROOMS) == 8
+
+
+def test_enrich_with_catalog_fills_office_and_capacity():
+    from domains.schedule_management.rooms_store import _enrich_with_catalog
+
+    stale = [
+        {
+            "id": "seoul_bali",
+            "name": "old-name",
+            "display_name": "old-name",
+            "capacity": 0,
+            "equipment": [],
+            "calendar_resource_id": "c_18886qq804vhijdjllp1d2p3kg67m@resource.calendar.google.com",
+            "location": "",
+            "office": "gunsan",
+            "default_priority": 10,
+        }
+    ]
+    enriched = _enrich_with_catalog(stale)
+    assert enriched[0]["office"] == "seoul"
+    assert enriched[0]["capacity"] == 6
+    assert enriched[0]["display_name"] == "Bali"
+
+
+def test_filter_rooms_by_office():
+    from domains.schedule_management.rooms import filter_rooms_by_office
+
+    rooms = [
+        {"id": "g1", "office": "gunsan"},
+        {"id": "s1", "office": "seoul"},
+        {"id": "g2", "office": "gunsan"},
+    ]
+    gunsan_only = filter_rooms_by_office(rooms, "gunsan")
+    assert [r["id"] for r in gunsan_only] == ["g1", "g2"]
+    seoul_only = filter_rooms_by_office(rooms, "seoul")
+    assert [r["id"] for r in seoul_only] == ["s1"]
+    assert filter_rooms_by_office(rooms, "") == rooms
+
+
+def test_working_location_match_office_by_label():
+    from domains.schedule_management.working_location import _match_office
+
+    assert _match_office("군산 사무실") == "gunsan"
+    assert _match_office("Gunsan Office") == "gunsan"
+    assert _match_office("서울 세아타워") == "seoul"
+    assert _match_office("Seoul HQ") == "seoul"
+    assert _match_office("자택") == ""
+    assert _match_office("") == ""
+
+
+def test_detect_office_for_date_no_token_returns_empty(monkeypatch):
+    from domains.schedule_management import working_location
+
+    working_location.clear_cache()
+    monkeypatch.setattr(working_location, "get_user_access_token", lambda email: None)
+    assert working_location.detect_office_for_date("user@x.com", "2026-05-10") == ""
+
+
+def test_detect_office_for_date_matches_office_location(monkeypatch):
+    from domains.schedule_management import working_location
+
+    working_location.clear_cache()
+    monkeypatch.setattr(working_location, "get_user_access_token", lambda email: "token")
+    monkeypatch.setattr(
+        working_location,
+        "_fetch_working_location_events",
+        lambda email, date_str: [
+            {
+                "eventType": "workingLocation",
+                "workingLocationProperties": {
+                    "type": "officeLocation",
+                    "officeLocation": {"label": "서울 세아타워"},
+                },
+            }
+        ],
+    )
+    assert working_location.detect_office_for_date("user@x.com", "2026-05-10") == "seoul"
+
+
+def test_resolve_room_region_explicit_overrides_detection(monkeypatch):
+    from domains.schedule_management import handler
+
+    monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "seoul")
+    state = {"room_region": "gunsan", "meeting_date": "2026-05-10"}
+    assert handler._resolve_room_region(state, "user@x.com") == ("gunsan", "gunsan")
+
+    state_all = {"room_region": "all", "meeting_date": "2026-05-10"}
+    assert handler._resolve_room_region(state_all, "user@x.com") == ("", "all")
+
+
+def test_resolve_room_region_falls_back_to_detection(monkeypatch):
+    from domains.schedule_management import handler
+
+    monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "gunsan")
+    state = {"room_region": "", "meeting_date": "2026-05-10"}
+    assert handler._resolve_room_region(state, "user@x.com") == ("gunsan", "gunsan")
+
+
+def test_resolve_room_region_unknown_shows_all(monkeypatch):
+    from domains.schedule_management import handler
+
+    monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    state = {"room_region": "", "meeting_date": "2026-05-10"}
+    assert handler._resolve_room_region(state, "user@x.com") == ("", "all")
+
+
 def test_merge_attendees_includes_resource():
     from domains.schedule_management.calendar_client import _merge_attendees
 

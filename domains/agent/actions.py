@@ -11,6 +11,7 @@ import threading
 from typing import Any
 
 from domains.agent import cards, store
+from domains.agent.config import agent_ui_enabled
 from domains.agent.orchestrator import (
     OUTCOME_DONE,
     OUTCOME_NEEDS_REAPPROVAL,
@@ -23,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 # 명료화 라운드 상한 — 무한 되묻기 루프 방지(초기 ask 포함 카운트).
 _MAX_CLARIFY_ATTEMPTS = 3
+
+_DISABLED_MESSAGE = "🤖 AI 자동 실행 기능은 현재 준비 중이에요. 곧 만나요!"
+
+
+def _disabled_reply() -> dict[str, Any]:
+    return {"text": _DISABLED_MESSAGE}
 
 
 def _user_email(chat_event: dict[str, Any] | None) -> str:
@@ -83,6 +90,9 @@ def handle_agent_request(
     ctx_block: str = "",
 ) -> dict[str, Any]:
     """Phase A — 계획을 세워 승인 카드로 반환한다. 실행은 승인 후."""
+    if not agent_ui_enabled():
+        return _disabled_reply()
+
     user_email = _user_email(chat_event)
     user_name = _user_name(chat_event)
     space_name = _space_name(chat_event)
@@ -200,6 +210,8 @@ def handle_agent_clarification(
     ctx_block: str = "",
 ) -> dict[str, Any]:
     """'명료화 대기' 중 들어온 후속 답변을 원 요청과 병합해 재계획한다."""
+    if not agent_ui_enabled():
+        return _disabled_reply()
     if not existing:
         return handle_agent_request(answer, chat_event=chat_event, ctx_block=ctx_block)
 
@@ -334,6 +346,8 @@ def handle_agent_revision(
     ctx_block: str = "",
 ) -> dict[str, Any]:
     """승인 대기 plan 을 사용자 자연어 수정 요청으로 갱신 → 같은 plan_id 승인 카드."""
+    if not agent_ui_enabled():
+        return _disabled_reply()
     if not existing_plan:
         return handle_agent_request(user_message, chat_event=chat_event, ctx_block=ctx_block)
 
@@ -456,6 +470,11 @@ def handle_agent_action(
 ) -> dict[str, Any]:
     """CARD_CLICKED ag_* 처리."""
     fn = (invoked_function or "").strip()
+
+    if not agent_ui_enabled():
+        # UI 버튼은 disabled 로 그레이아웃되지만, 배포 전에 이미 전달된 카드(캐시된
+        # 옛 카드)로 우회 클릭될 수 있어 서버 쪽에서도 동일하게 막는다.
+        return _disabled_reply()
 
     # 하이브리드 랜딩의 'AI에게 맡기기' — 원본 발화로 계획 수립 흐름에 진입.
     if fn == "ag_delegate":

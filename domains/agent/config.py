@@ -17,6 +17,16 @@ MAX_TOTAL_REPAIRS = int(os.environ.get("AGENT_MAX_TOTAL_REPAIRS") or "5")
 RETRY_BACKOFF_BASE_SEC = float(os.environ.get("AGENT_RETRY_BACKOFF_BASE_SEC") or "1.0")
 
 
+def agent_ui_enabled() -> bool:
+    """자율 에이전트(계획 수립→승인→실행) 기능 전체 마스터 스위치.
+
+    기본 off — 회의실 예약 등 확정 기능의 전사 배포를 우선하는 동안, 미완성인 자율
+    실행 기능(계획 수립·CTA 버튼·승인 카드)을 노출하지 않기 위함. 켜려면
+    AGENT_UI_ENABLED=true.
+    """
+    return (os.environ.get("AGENT_UI_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def react_enabled() -> bool:
     """ReAct 동적 재계획 on/off. 기본 off — 켜면 실행 중 조회/생성 단계를 동적으로 보강한다."""
     return (os.environ.get("AGENT_REACT_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")

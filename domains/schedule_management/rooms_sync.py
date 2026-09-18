@@ -19,10 +19,11 @@ from domains.schedule_management.gunsan_rooms import (
 )
 from domains.schedule_management.room_calendar_store import get_room_calendar_config
 from domains.schedule_management.rooms_store import upsert_rooms
+from domains.schedule_management.seoul_rooms import EXPECTED_SEOUL_ROOM_COUNT
 
 logger = logging.getLogger(__name__)
 
-_EXPECTED_ROOM_COUNT = EXPECTED_GUNSAN_ROOM_COUNT
+_EXPECTED_ROOM_COUNT = EXPECTED_GUNSAN_ROOM_COUNT + EXPECTED_SEOUL_ROOM_COUNT
 
 
 def _room_from_calendar_item(item: dict[str, Any]) -> dict[str, Any] | None:

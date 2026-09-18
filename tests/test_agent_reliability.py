@@ -80,7 +80,8 @@ def test_handle_agent_revision_keeps_plan_id():
     def _capture_push(*, space_name, payload):
         pushed_card.update(payload if isinstance(payload, dict) else {"text": str(payload)})
 
-    with patch("api.chat.loading.start_background", side_effect=_sync_bg), \
+    with patch("domains.agent.actions.agent_ui_enabled", return_value=True), \
+         patch("api.chat.loading.start_background", side_effect=_sync_bg), \
          patch("domains.agent.actions.revise_plan", return_value=revised), \
          patch("domains.agent.actions.store.update_plan") as upd, \
          patch("domains.agent.memory.load_user_memory", return_value=[]), \

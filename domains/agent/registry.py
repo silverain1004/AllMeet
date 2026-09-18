@@ -368,15 +368,18 @@ def _run_get_email_body(**kwargs: Any) -> dict[str, Any]:
 
 
 def _run_list_meeting_rooms(**kwargs: Any) -> dict[str, Any]:
+    from domains.schedule_management.rooms import filter_rooms_by_office
     from domains.schedule_management.rooms_store import get_rooms
 
-    rooms = get_rooms() or []
+    office = str(kwargs.get("office") or "").strip()
+    rooms = filter_rooms_by_office(get_rooms() or [], office)
     out = [
         {
             "name": str(r.get("display_name") or r.get("name") or "").strip(),
             "capacity": r.get("capacity"),
             "equipment": r.get("equipment") or [],
             "location": str(r.get("location") or "").strip(),
+            "office": str(r.get("office") or "gunsan").strip(),
             # 예약용 calendar_id (create_meeting/find_free_slots 의 calendar_id 로 사용)
             "calendar_id": str(r.get("calendar_resource_id") or "").strip(),
         }
@@ -998,12 +1001,19 @@ def register_default_tools() -> None:
     register(Tool(
         name="list_meeting_rooms",
         description=(
-            "사내 회의실 목록과 각 방의 예약용 calendar_id(+정원·장비·위치)를 반환한다. "
+            "사내 회의실 목록과 각 방의 예약용 calendar_id(+정원·장비·위치·office)를 반환한다. "
+            "군산(office=gunsan)·서울(office=seoul) 회의실이 있다 — office 인자로 필터링 가능(생략 시 전체). "
             "회의실을 예약(create_meeting)하거나 빈 시간 확인(find_free_slots) 하기 전에 이 도구로 방을 "
-            "찾아 calendar_id 를 얻어라. 인자는 없고 {rooms:[{name,capacity,equipment,location,calendar_id}]} 반환. "
+            "찾아 calendar_id 를 얻어라. {rooms:[{name,capacity,equipment,location,office,calendar_id}]} 반환. "
             "이후 단계에서 특정 방의 calendar_id 는 {\"$ref\": \"<이단계>.rooms.0.calendar_id\"} 로 연결."
         ),
-        parameters={"type": "object", "properties": {}, "required": []},
+        parameters={
+            "type": "object",
+            "properties": {
+                "office": {"type": "string", "description": "'gunsan' 또는 'seoul' (생략 시 전체)"},
+            },
+            "required": [],
+        },
         run=_run_list_meeting_rooms,
         examples=[{"when": "회의실 예약/빈 회의실 찾기 전에 방 목록·calendar_id 조회", "args": {}}],
     ))

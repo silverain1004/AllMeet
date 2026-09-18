@@ -9,12 +9,23 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from domains.agent.config import agent_ui_enabled
 
-def _action_button(text: str, function: str, *, parameters: dict[str, str] | None = None) -> dict[str, Any]:
+
+def _action_button(
+    text: str,
+    function: str,
+    *,
+    parameters: dict[str, str] | None = None,
+    disabled: bool = False,
+) -> dict[str, Any]:
     action: dict[str, Any] = {"function": function}
     if parameters:
         action["parameters"] = [{"key": k, "value": v} for k, v in parameters.items()]
-    return {"text": text, "onClick": {"action": action}}
+    btn: dict[str, Any] = {"text": text, "onClick": {"action": action}}
+    if disabled:
+        btn["disabled"] = True
+    return btn
 
 
 def _wrap_card(card_id: str, header: dict[str, Any], widgets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -112,17 +123,24 @@ def build_agent_cta_card(
     """하이브리드 랜딩의 'AI 위임' 카드 — 정적 프로세스 미리보기 + ag_delegate 버튼.
 
     단일 카드(dict)를 반환하며, 호출 측이 base 응답의 cardsV2 리스트에 합친다.
+    agent_ui_enabled() 가 꺼져 있으면 버튼을 그레이아웃(disabled)하고 준비 중임을 알린다
+    — 기능 자체를 숨기지 않고 로드맵으로 남겨둔 채 우선 실행만 막는다.
     """
+    enabled = agent_ui_enabled()
     steps = "<br>".join(f"{i}. {html.escape(s)}" for i, s in enumerate(outline, start=1)) or "AI가 알아서 처리해요."
+    if not enabled:
+        steps += '<br><font color="#9aa0a6">(준비 중이에요 — 곧 만나요!)</font>'
+    button_label = label if enabled else f"{label} (준비 중)"
     widgets: list[dict[str, Any]] = [
         {"textParagraph": {"text": f"<b>AI에게 맡기면 이렇게 진행해요</b><br>{steps}"}},
         {
             "buttonList": {
                 "buttons": [
                     _action_button(
-                        label,
+                        button_label,
                         "ag_delegate",
                         parameters={"user_message": user_message, "intent": intent_value},
+                        disabled=not enabled,
                     )
                 ]
             }

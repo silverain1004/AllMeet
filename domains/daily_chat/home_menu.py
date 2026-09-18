@@ -235,9 +235,7 @@ def build_added_to_space_card(
         state=encode_state(user_email=email, space_name=space_name),
     )
     intro = (
-        "👋 <b>AllMeet</b>이에요! "
-        "지금은 <font color=\"#d93025\"><b>아직 연결되어 있지 않아요.</b></font> "
-        "아래 내용을 확인하고 연결해 주세요."
+        "👋 안녕하세요! 올밋을 찾아주셔서 감사합니다."
     )
     card = build_oauth_link_card(user_email=email, auth_url=url, intro=intro)
     card["text"] = "AllMeet을 쓰려면 내 데이터(GWS) 연결이 필요해요."
