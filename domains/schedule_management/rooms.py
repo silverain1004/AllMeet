@@ -55,14 +55,19 @@ def filter_rooms_by_office(rooms: list[dict[str, Any]], office: str) -> list[dic
 
 
 def _attendee_count_for_state(state: dict[str, Any]) -> int:
+    """정원 필터·정렬에 쓰는 실제 인원. 버튼 값(4+ 등)은 내림 버킷이라 '5명'이라고 말한 원값과
+    실제 참석자 수 중 큰 쪽을 써야 4인실이 5명 회의에 추천되지 않는다."""
     attendees = state.get("attendees") or []
-    explicit = state.get("attendee_count")
-    if explicit is not None:
+    candidates = [len(attendees)]
+    for key in ("attendee_count", "attendee_headcount"):
+        raw = state.get(key)
+        if raw is None:
+            continue
         try:
-            return max(int(explicit), 1)
+            candidates.append(int(raw))
         except (TypeError, ValueError):
-            return max(len(attendees), 1)
-    return max(len(attendees), 1)
+            continue
+    return max(max(candidates), 1)
 
 
 def _room_recommendation_sort_key(

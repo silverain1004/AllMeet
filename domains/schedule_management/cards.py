@@ -132,6 +132,19 @@ def _error_widgets(errors: list[str]) -> list[dict[str, Any]]:
     ]
 
 
+def _info_widgets(infos: list[str]) -> list[dict[str, Any]]:
+    """에러(빨강)와 구분되는 회색 안내 — '이미 추가돼 있어요' 같은 정상 상황용."""
+    if not infos:
+        return []
+    return [
+        {
+            "textParagraph": {
+                "text": '<font color="#9aa0a6">' + "<br>".join(html.escape(i) for i in infos) + "</font>"
+            }
+        }
+    ]
+
+
 def _columns_two(left_widget: dict[str, Any], right_widget: dict[str, Any]) -> dict[str, Any]:
     return {
         "columns": {
@@ -196,6 +209,24 @@ def _attendee_count_button_widget(state: dict[str, Any], base_params: dict[str, 
             btn["type"] = "FILLED"
         buttons.append(btn)
     return {"buttonList": {"buttons": buttons}}
+
+
+def _headcount_note_widgets(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """'5명'이라 말했는데 버튼은 4+ 로 내림된 경우 — 추천은 실제 인원 기준임을 알린다."""
+    try:
+        headcount = int(state.get("attendee_headcount") or 0)
+        bucket = int(state.get("attendee_count") or 0)
+    except (TypeError, ValueError):
+        return []
+    if headcount <= 0 or headcount <= bucket:
+        return []
+    return [
+        {
+            "textParagraph": {
+                "text": f'<font color="#9aa0a6">현재 참석 {headcount}명 기준으로 추천</font>'
+            }
+        }
+    ]
 
 
 def _duration_radio_widget(state: dict[str, Any], base_params: dict[str, str]) -> dict[str, Any]:
@@ -741,6 +772,51 @@ def _room_widgets(
     return widgets
 
 
+def _slot_buttons(slots: list[Any], base_params: dict[str, str]) -> dict[str, Any]:
+    buttons: list[dict[str, Any]] = []
+    for slot in slots:
+        room = html.escape(str(slot.top_room_name or "회의실"))
+        label = f"{slot.meeting_time}~{slot.meeting_end_time} · {room}"
+        params = dict(base_params)
+        params.update(
+            {
+                "slot_date": slot.meeting_date,
+                "slot_time": slot.meeting_time,
+                "slot_end_time": slot.meeting_end_time,
+            }
+        )
+        buttons.append(
+            {
+                "text": label[:80],
+                "onClick": {
+                    "action": {
+                        "function": "sm_compose_pick_slot",
+                        "parameters": _params_list(params),
+                    }
+                },
+            }
+        )
+    return {"buttonList": {"buttons": buttons}}
+
+
+def _day_slot_widgets(
+    day_slots: list[Any] | None,
+    note: str,
+    base_params: dict[str, str],
+) -> list[dict[str, Any]]:
+    """"팀원들 다 되는 시간에" — 참석자·회의실이 모두 비는 시각 후보."""
+    if not day_slots and not note:
+        return []
+    widgets: list[dict[str, Any]] = [
+        {"textParagraph": {"text": "<b>참석자·회의실 모두 가능한 시간</b>"}},
+    ]
+    if day_slots:
+        widgets.append(_slot_buttons(day_slots, base_params))
+    if note:
+        widgets.append({"textParagraph": {"text": f'<font color="#9aa0a6">{html.escape(note)}</font>'}})
+    return widgets
+
+
 def _conflict_widgets(
     conflict_check: Any,
     state: dict[str, Any],
@@ -748,100 +824,101 @@ def _conflict_widgets(
 ) -> list[dict[str, Any]]:
     if not conflict_check or not getattr(conflict_check, "has_conflict", False):
         return []
+    conflicts = list(conflict_check.conflicts or [])
+    time_conflicts = [c for c in conflicts if str(getattr(c, "kind", "") or "") != "vacation"]
+    vacations = [c for c in conflicts if str(getattr(c, "kind", "") or "") == "vacation"]
 
-    widgets: list[dict[str, Any]] = [
-        {"textParagraph": {"text": "<b>일정이 겹칩니다</b>"}},
-    ]
-    for conflict in conflict_check.conflicts or []:
+    widgets: list[dict[str, Any]] = []
+    if time_conflicts:
+        widgets.append({"textParagraph": {"text": "<b>일정이 겹칩니다</b>"}})
+    for conflict in time_conflicts:
         label = html.escape(str(conflict.label or ""))
         summary = html.escape(str(conflict.event_summary or ""))
         when = html.escape(str(conflict.display_time or ""))
         line = f"{label}: {summary}"
         if when:
             line += f" ({when})"
-        row_buttons: list[dict[str, Any]] = []
         link = str(conflict.html_link or "").strip()
         if link:
-            row_buttons.append(
-                {
-                    "text": "캘린더에서 보기",
-                    "onClick": {"openLink": {"url": link}},
-                }
-            )
-        if row_buttons:
             widgets.append(
                 {
                     "decoratedText": {
                         "text": line,
                         "wrapText": True,
-                        "button": row_buttons[0],
+                        "button": {
+                            "text": "캘린더에서 보기",
+                            "onClick": {"openLink": {"url": link}},
+                        },
                     }
                 }
             )
         else:
             widgets.append({"textParagraph": {"text": line}})
 
-    alternatives = conflict_check.alternatives or []
-    if alternatives:
-        widgets.append({"textParagraph": {"text": "<b>이 시간은 회의실도 가능해요</b>"}})
-        alt_buttons: list[dict[str, Any]] = []
-        for slot in alternatives:
-            room = html.escape(str(slot.top_room_name or "회의실"))
-            label = f"{slot.meeting_time}~{slot.meeting_end_time} · {room}"
+    if vacations:
+        # 휴가는 차단이 아니라 경고 — 한 번에 그 사람만 빼고 이어갈 수 있게 한다.
+        widgets.append({"textParagraph": {"text": "<b>휴가·부재 참석자가 있어요</b>"}})
+        for conflict in vacations:
+            label = html.escape(str(conflict.label or ""))
+            summary = html.escape(str(conflict.event_summary or ""))
             params = dict(base_params)
-            params.update(
+            params["remove_email"] = str(getattr(conflict, "attendee_email", "") or "")
+            widgets.append(
                 {
-                    "slot_date": slot.meeting_date,
-                    "slot_time": slot.meeting_time,
-                    "slot_end_time": slot.meeting_end_time,
+                    "decoratedText": {
+                        "text": f"{label}: {summary}",
+                        "wrapText": True,
+                        "button": {
+                            "text": "빼고 진행",
+                            "onClick": {
+                                "action": {
+                                    "function": "sm_compose_remove_attendee_email",
+                                    "parameters": _params_list(params),
+                                }
+                            },
+                        },
+                    }
                 }
             )
-            alt_buttons.append(
-                {
-                    "text": label[:80],
-                    "onClick": {
-                        "action": {
-                            "function": "sm_compose_pick_slot",
-                            "parameters": _params_list(params),
-                        }
-                    },
-                }
-            )
-        widgets.append({"buttonList": {"buttons": alt_buttons}})
 
-    else:
-        # 대안이 없을 때 충돌 문구만 남기면 "그래서 언제 잡으라는 건지" 를 알 수 없다.
+    if time_conflicts:
+        alternatives = conflict_check.alternatives or []
+        if alternatives:
+            widgets.append({"textParagraph": {"text": "<b>이 시간은 회의실도 가능해요</b>"}})
+            widgets.append(_slot_buttons(alternatives, base_params))
+        else:
+            # 대안이 없을 때 충돌 문구만 남기면 "그래서 언제 잡으라는 건지" 를 알 수 없다.
+            widgets.append(
+                {
+                    "textParagraph": {
+                        "text": (
+                            f"{BUSINESS_HOUR_START}~{BUSINESS_HOUR_END} 사이에는 "
+                            "참석자와 회의실이 모두 되는 시간이 없습니다"
+                        )
+                    }
+                }
+            )
+
+        requested = html.escape(str(conflict_check.requested_time or state.get("meeting_time") or ""))
+        keep_params = dict(base_params)
+        keep_params["ignore_conflict"] = "1"
         widgets.append(
             {
-                "textParagraph": {
-                    "text": (
-                        f"{BUSINESS_HOUR_START}~{BUSINESS_HOUR_END} 사이에는 "
-                        "참석자와 회의실이 모두 되는 시간이 없습니다"
-                    )
+                "buttonList": {
+                    "buttons": [
+                        {
+                            "text": f"요청한 {requested} 그대로 진행",
+                            "onClick": {
+                                "action": {
+                                    "function": "sm_compose_keep_requested_time",
+                                    "parameters": _params_list(keep_params),
+                                }
+                            },
+                        }
+                    ]
                 }
             }
         )
-
-    requested = html.escape(str(conflict_check.requested_time or state.get("meeting_time") or ""))
-    keep_params = dict(base_params)
-    keep_params["ignore_conflict"] = "1"
-    widgets.append(
-        {
-            "buttonList": {
-                "buttons": [
-                    {
-                        "text": f"요청한 {requested} 그대로 진행",
-                        "onClick": {
-                            "action": {
-                                "function": "sm_compose_keep_requested_time",
-                                "parameters": _params_list(keep_params),
-                            }
-                        },
-                    }
-                ]
-            }
-        }
-    )
     widgets.append({"divider": {}})
     return widgets
 
@@ -853,17 +930,22 @@ def build_quick_compose_card(
     conflict_check: Any = None,
     room_preview_ready: bool = True,
     room_region_active: str = "all",
+    day_slots: list[Any] | None = None,
+    day_slots_note: str = "",
     include_action_response: bool = False,
 ) -> dict[str, Any]:
     base_params = state_to_button_params(state)
     base_params["compose_step"] = "quick"
     widgets: list[dict[str, Any]] = _error_widgets(state.get("errors") or [])
+    widgets.extend(_info_widgets(state.get("info") or []))
     widgets.extend(_conflict_widgets(conflict_check, state, base_params))
     date_val = str(state.get("meeting_date") or "")
     widgets.extend(_meeting_date_widgets(date_val, base_params))
     widgets.append(_attendee_count_button_widget(state, base_params))
+    widgets.extend(_headcount_note_widgets(state))
     widgets.append(_time_row_widget(state, base_params))
     widgets.append(_duration_radio_widget(state, base_params))
+    widgets.extend(_day_slot_widgets(day_slots, day_slots_note, base_params))
     widgets.extend(_room_region_button_widget(base_params, room_region_active))
 
     if room_preview_ready:
@@ -900,6 +982,7 @@ def build_full_compose_card(
     base_params = state_to_button_params(state)
     base_params["compose_step"] = "full"
     widgets: list[dict[str, Any]] = _error_widgets(state.get("errors") or [])
+    widgets.extend(_info_widgets(state.get("info") or []))
 
     summary = _compose_summary_line(state)
     if summary:
@@ -974,6 +1057,15 @@ def build_full_compose_card(
                 }
             ],
         )
+    )
+    widgets.append(
+        {
+            "textParagraph": {
+                "text": (
+                    '<font color="#9aa0a6">💡 팀명(예: PC2팀)만 입력하면 팀원 전체가 추가돼요</font>'
+                )
+            }
+        }
     )
 
     want_meet = bool(state.get("want_meet") or state.get("auto_meet"))
@@ -1081,6 +1173,8 @@ def build_compose_card(
     conflict_check: Any = None,
     room_preview_ready: bool = True,
     room_region_active: str = "all",
+    day_slots: list[Any] | None = None,
+    day_slots_note: str = "",
     include_action_response: bool = False,
 ) -> dict[str, Any]:
     step = str(state.get("compose_step") or "quick")
@@ -1100,5 +1194,7 @@ def build_compose_card(
         conflict_check=conflict_check,
         room_preview_ready=room_preview_ready,
         room_region_active=room_region_active,
+        day_slots=day_slots,
+        day_slots_note=day_slots_note,
         include_action_response=include_action_response,
     )

@@ -29,6 +29,161 @@ def test_extract_meet_auto_flag():
     assert state["auto_meet"] is True
 
 
+_PC2_MEMBERS = [
+    {"name": "김민수", "email": "minsu@x.com", "nickname": [], "team_id": "PC2", "team_name": "PC2팀"},
+    {"name": "이지은", "email": "jieun@x.com", "nickname": [], "team_id": "PC2", "team_name": "PC2팀"},
+    {"name": "박서준", "email": "seojun@x.com", "nickname": [], "team_id": "ERP2", "team_name": "ERP2팀"},
+]
+
+
+def test_extract_team_bulk_add_with_qualifier():
+    from domains.schedule_management.conversation import extract_compose_state
+
+    state = extract_compose_state("내일 3시 PC2팀 팀원들이랑 회의 잡아줘", members=_PC2_MEMBERS)
+    emails = {a["email"] for a in state["attendees"]}
+    assert emails == {"minsu@x.com", "jieun@x.com"}
+
+
+def test_extract_team_mention_without_qualifier_does_not_bulk_add():
+    """"PC2팀 회의 잡아줘"는 팀 소속 회의일 뿐 전원 초대 의도가 아닐 수 있어 무시한다."""
+    from domains.schedule_management.conversation import extract_compose_state
+
+    state = extract_compose_state("내일 3시 PC2팀 회의 잡아줘", members=_PC2_MEMBERS)
+    assert state["attendees"] == []
+
+
+def test_resolve_team_id_from_text_matches_longest_first():
+    from domains.schedule_management.mentions import resolve_team_id_from_text
+
+    teams = [{"id": "ERP2", "name": "ERP2팀"}, {"id": "PC2", "name": "PC2팀"}]
+    assert resolve_team_id_from_text("PC2팀 팀원들 추가해줘", teams) == "PC2"
+    assert resolve_team_id_from_text("관련 없는 문장", teams) is None
+
+
+def test_handler_find_team_members_bulk_add_without_qualifier():
+    """참석자 입력란은 팀명만 넣어도(한정어 없이) 팀 전원을 추가한다."""
+    from domains.schedule_management.handler import _find_team_members
+
+    matches = _find_team_members("PC2팀", _PC2_MEMBERS)
+    assert {m["email"] for m in matches} == {"minsu@x.com", "jieun@x.com"}
+
+
+def test_handler_sm_compose_add_attendee_bulk_adds_team(monkeypatch):
+    from domains.schedule_management import handler
+
+    monkeypatch.setattr(handler, "get_all_members", lambda: _PC2_MEMBERS)
+    # 카드 렌더가 타는 라이브 Firestore/Google 호출은 전부 끊는다 — 네트워크에 걸리면 테스트가 멈춘다.
+    monkeypatch.setattr(handler, "get_rooms", lambda: [])
+    monkeypatch.setattr(handler, "is_oauth_linked", lambda email: False)
+    monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    monkeypatch.setattr(
+        handler, "_calendar_options", lambda chat_event, linked=None: [{"id": "primary", "label": "내 캘린더"}]
+    )
+    state = handler.compose_state_from({"compose_step": "full"}, {})
+    out = handler.handle_schedule_management_action(
+        invoked_function="sm_compose_add_attendee",
+        parameters=handler.state_to_button_params(state),
+        form_inputs={"attendee_input": {"stringInputs": {"value": ["PC2팀"]}}},
+        chat_event={"user": {"email": "me@x.com"}},
+    )
+    text = str(out)
+    assert "minsu@x.com" in text
+    assert "jieun@x.com" in text
+
+
+def test_extract_exclusion_after_team_bulk_add():
+    """"PC2팀 팀원들, 김민수는 빼고" → 팀 전원 추가 뒤 김민수만 제외."""
+    from domains.schedule_management.conversation import extract_compose_state
+
+    state = extract_compose_state(
+        "내일 3시 PC2팀 팀원들이랑 회의 잡아줘, 김민수는 빼고", members=_PC2_MEMBERS
+    )
+    assert {a["email"] for a in state["attendees"]} == {"jieun@x.com"}
+
+
+def test_extract_exclusion_ignores_non_member_token():
+    """"회의는 말고" 같은 문장은 멤버가 아니라 제외 대상이 없고, 크래시도 없다."""
+    from domains.schedule_management.conversation import extract_compose_state
+
+    state = extract_compose_state("내일 3시 이지은이랑 회의는 말고 미팅", members=_PC2_MEMBERS)
+    assert {a["email"] for a in state["attendees"]} == {"jieun@x.com"}
+
+
+def test_extract_attendee_count_snaps_down_to_button_option():
+    """"N+" 버튼은 'N명 이상' — 5명은 4+, 12명은 10+, 2명은 최소 옵션 4+, 20명은 15+."""
+    from domains.schedule_management.conversation import extract_compose_state
+
+    def count(msg: str) -> int:
+        return extract_compose_state(msg, members=[])["attendee_count"]
+
+    assert count("내일 3시 5명 정도 회의 잡아줘") == 4
+    assert count("내일 3시 9명 회의") == 8
+    assert count("내일 3시 12명 회의") == 10
+    assert count("내일 3시 2명 회의") == 4
+    assert count("내일 3시 20명 회의") == 15
+
+
+def test_pick_attendee_count_option_floors_to_label_bucket():
+    from domains.schedule_management.compose_state import pick_attendee_count_option
+
+    assert pick_attendee_count_option(5) == 4
+    assert pick_attendee_count_option(8) == 8
+    assert pick_attendee_count_option(14) == 10
+    assert pick_attendee_count_option(1) == 4
+    assert pick_attendee_count_option(100) == 15
+
+
+def test_extract_room_region_from_words_and_floors():
+    from domains.schedule_management.conversation import extract_compose_state
+
+    assert extract_compose_state("내일 3시 서울로 회의", members=[])["room_region"] == "seoul"
+    assert extract_compose_state("내일 3시 군산으로 회의", members=[])["room_region"] == "gunsan"
+    assert extract_compose_state("내일 3시 7층으로 회의", members=[])["room_region"] == "seoul"
+    assert extract_compose_state("내일 3시 3층 회의", members=[])["room_region"] == "gunsan"
+    # 17층은 없는 층 — 7층으로 오인하지 않는다
+    assert extract_compose_state("내일 3시 17층 회의", members=[])["room_region"] == ""
+
+
+def test_extract_specific_room_name_sets_keyword_and_region():
+    from domains.schedule_management.conversation import extract_compose_state
+
+    state = extract_compose_state("내일 3시 Bali로 회의 잡아줘", members=[])
+    assert state["room_name_keyword"] == "Bali"
+    assert state["room_region"] == "seoul"
+
+    state = extract_compose_state("내일 3시 V-Room으로 회의", members=[])
+    assert state["room_name_keyword"] == "V-Room"
+    assert state["room_region"] == "gunsan"
+
+
+def test_extract_explicit_region_beats_room_office():
+    from domains.schedule_management.conversation import extract_compose_state
+
+    state = extract_compose_state("내일 3시 서울로, T-Room 말고 회의", members=[])
+    assert state["room_region"] == "seoul"
+
+
+def test_extract_room_name_not_fooled_by_email():
+    """seoul.kim@x.com 의 'seoul'을 Seoul 회의실로 오인하지 않는다."""
+    from domains.schedule_management.conversation import extract_compose_state
+
+    state = extract_compose_state("내일 3시 seoul.kim@x.com 초대해서 회의", members=[])
+    assert state["room_name_keyword"] == ""
+    assert state["room_region"] == ""
+    assert [a["email"] for a in state["attendees"]] == ["seoul.kim@x.com"]
+
+
+def test_merge_extracted_state_carries_region_and_count():
+    from domains.schedule_management.compose_state import empty_compose_state
+    from domains.schedule_management.handler import _merge_extracted_state
+
+    out = _merge_extracted_state(
+        empty_compose_state(), {"room_region": "seoul", "attendee_count": 5}
+    )
+    assert out["room_region"] == "seoul"
+    assert out["attendee_count"] == 5
+
+
 def test_attendees_serialize_roundtrip():
     from domains.schedule_management.compose_state import (
         deserialize_attendees,

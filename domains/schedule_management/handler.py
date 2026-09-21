@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 import time
 from datetime import datetime, timedelta
@@ -38,8 +39,18 @@ from domains.schedule_management.compose_availability import (
     can_fetch_compose_snapshot,
     fetch_compose_snapshot,
 )
-from domains.schedule_management.conflict_slots import ConflictCheckResult, check_schedule_conflicts
+from domains.schedule_management.conflict_slots import (
+    ConflictCheckResult,
+    check_schedule_conflicts,
+    suggest_day_slots,
+)
 from domains.schedule_management.conversation import extract_compose_state_with_llm_fallback
+from domains.schedule_management.mentions import (
+    exact_member_matches,
+    resolve_team_id_from_text,
+    team_members_by_id,
+    teams_from_members,
+)
 from domains.schedule_management.oauth_calendar import (
     decode_calendar_selection,
     get_user_access_token,
@@ -202,6 +213,47 @@ def _find_member_matches(query: str, members: list[dict[str, Any]]) -> list[dict
     return matches
 
 
+def _find_team_members(query: str, members: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """참석자 입력란에 팀명("PC2팀")을 넣으면 그 팀 전원. 이 입력란은 참석자 추가가
+    유일한 용도라, 자유 발화와 달리 "팀원들" 같은 한정어 없이 팀명만으로도 충분하다."""
+    team_id = resolve_team_id_from_text(query, teams_from_members(members))
+    if not team_id:
+        return []
+    return team_members_by_id(team_id, members)
+
+
+def _team_name_for(team_id: str, members: list[dict[str, Any]]) -> str:
+    for t in teams_from_members(members):
+        if t["id"] == team_id:
+            return t["name"]
+    return team_id
+
+
+def _close_member_candidates(query: str, members: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """오타 난 이름에 비슷한 팀원 후보(최대 5명) — 자동 추가하지 않고 선택 버튼으로만."""
+    q = (query or "").strip()
+    if len(q) < 2:
+        return []
+    keys: dict[str, dict[str, str]] = {}
+    for m in members:
+        email = str(m.get("email") or "").strip()
+        if not email:
+            continue
+        name = str(m.get("name") or "").strip()
+        for label in [name] + [str(n).strip() for n in (m.get("nickname") or [])]:
+            if label and label not in keys:
+                keys[label] = {"name": name, "email": email}
+    close = difflib.get_close_matches(q, list(keys), n=5, cutoff=0.6)
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for label in close:
+        cand = keys[label]
+        if cand["email"] not in seen:
+            out.append(cand)
+            seen.add(cand["email"])
+    return out
+
+
 def _resolve_room_region(state: dict[str, Any], email: str) -> tuple[str, str]:
     """(office_filter, active_ui_value).
 
@@ -308,6 +360,24 @@ def _render_compose(
     snapshot = None
     conflict_check: ConflictCheckResult | None = None
     rooms: list[dict[str, Any]] = []
+    day_slots: list[Any] = []
+    day_slots_note = ""
+    if state.get("find_slot") and state.get("meeting_date") and not state.get("meeting_time"):
+        if access:
+            try:
+                day_slots, unknown = suggest_day_slots(
+                    state, access_token=access, api_calendar_id=api_cal, rooms=room_list
+                )
+            except Exception:
+                day_slots, unknown = [], 0
+            if not day_slots:
+                day_slots_note = "참석자·회의실이 모두 비는 시간을 찾지 못했어요. 시간을 직접 선택해 주세요."
+            elif unknown:
+                day_slots_note = (
+                    f"확인 불가 {unknown}명 — 일정을 비공개한 참석자는 가능한 것으로 보일 수 있어요."
+                )
+        else:
+            day_slots_note = "빈 시간 자동 탐색은 '내 데이터 연결' 후 가능해요. 시간을 직접 선택해 주세요."
     if preview_ready:
         if access and can_fetch_compose_snapshot(state):
             snapshot = fetch_compose_snapshot(
@@ -349,13 +419,15 @@ def _render_compose(
         conflict_check=conflict_check,
         room_preview_ready=preview_ready,
         room_region_active=active_region,
+        day_slots=day_slots,
+        day_slots_note=day_slots_note,
         include_action_response=include_action_response,
     )
 
 
 def _merge_extracted_state(base: dict[str, Any], extracted: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
-    for key in ("meeting_date", "meeting_time", "title"):
+    for key in ("meeting_date", "meeting_time", "meeting_end_time", "title"):
         if extracted.get(key) and not out.get(key):
             out[key] = extracted[key]
     if extracted.get("attendees"):
@@ -367,15 +439,23 @@ def _merge_extracted_state(base: dict[str, Any], extracted: dict[str, Any]) -> d
         out["equipment_keywords"] = list(
             set((out.get("equipment_keywords") or []) + extracted["equipment_keywords"])
         )
-    for k in ("location_keyword", "room_name_keyword"):
+    for k in ("location_keyword", "room_name_keyword", "room_region"):
         if extracted.get(k) and not out.get(k):
             out[k] = extracted[k]
+    for k in ("attendee_count", "attendee_headcount"):
+        if extracted.get(k) is not None and out.get(k) is None:
+            out[k] = extracted[k]
+    if extracted.get("find_slot"):
+        out["find_slot"] = True
     if extracted.get("auto_meet"):
         out["want_meet"] = True
     if extracted.get("duration_minutes") and not out.get("duration_minutes"):
         out["duration_minutes"] = extracted["duration_minutes"]
         dm = extracted["duration_minutes"]
-        if dm == 120:
+        if extracted.get("duration_mode") == "custom" or extracted.get("meeting_end_time"):
+            # "3시부터 5시까지" — 종료시각이 있으면 직접입력 모드로 그대로 싣는다.
+            out["duration_mode"] = "custom"
+        elif dm == 120:
             out["duration_mode"] = "2h"
         elif dm != 60:
             out["duration_mode"] = "custom"
@@ -482,7 +562,11 @@ def handle_schedule_management(
         return out
 
     members = get_all_members()
-    extracted = extract_compose_state_with_llm_fallback(user_message, members=members)
+    extracted = extract_compose_state_with_llm_fallback(
+        user_message,
+        members=members,
+        sender_email=_user_context(chat_event).get("email", ""),
+    )
     state = _merge_extracted_state(empty_compose_state(), extracted)
     state["compose_step"] = "quick"
     _ensure_booker_in_attendees(state, _user_context(chat_event).get("email", ""))
@@ -685,6 +769,7 @@ def handle_schedule_management_action(
         state["compose_step"] = "full"
         raw = _safe_form_value(form_inputs, "attendee_input")
         state["errors"] = []
+        state["info"] = []
         if not raw:
             state["errors"] = ["참석자 이름 또는 이메일을 입력해 주세요."]
             return _render_compose(
@@ -696,15 +781,49 @@ def handle_schedule_management_action(
             if not any(a.get("email") == email_hint for a in state.get("attendees") or []):
                 state.setdefault("attendees", []).append(entry)
         else:
-            matches = _find_member_matches(raw, members)
-            if len(matches) == 1:
-                m = matches[0]
-                if not any(a.get("email") == m["email"] for a in state.get("attendees") or []):
+            # 정확한 사람 매치 → 팀명 → 부분 일치 → 비슷한 이름 후보. 사람을 팀보다 먼저 봐야
+            # 'mes2kim' 같은 닉네임이 MES2팀 전원 추가로 새지 않는다.
+            existing_emails = {a.get("email") for a in state.get("attendees") or []}
+            exact = exact_member_matches(raw, members)
+            team_id = None if exact else resolve_team_id_from_text(raw, teams_from_members(members))
+            if len(exact) == 1:
+                m = exact[0]
+                if m["email"] in existing_emails:
+                    state["info"] = [f"{m['name'] or m['email']}은(는) 이미 참석자에 있어요."]
+                else:
                     state.setdefault("attendees", []).append(m)
-            elif len(matches) > 1:
-                pending = matches
+            elif len(exact) > 1:
+                pending = exact
+            elif team_id:
+                team_matches = team_members_by_id(team_id, members)
+                if not team_matches:
+                    state["errors"] = [f"{_team_name_for(team_id, members)}에 이메일이 등록된 팀원이 없습니다."]
+                else:
+                    added = 0
+                    for m in team_matches:
+                        if m["email"] not in existing_emails:
+                            state.setdefault("attendees", []).append(m)
+                            existing_emails.add(m["email"])
+                            added += 1
+                    if added == 0:
+                        state["info"] = ["이미 모두 참석자로 추가되어 있어요."]
             else:
-                state["errors"] = ["등록된 이름이 없습니다. 이메일 형식으로 입력해 주세요."]
+                matches = _find_member_matches(raw, members)
+                if len(matches) == 1:
+                    m = matches[0]
+                    if m["email"] not in existing_emails:
+                        state.setdefault("attendees", []).append(m)
+                elif len(matches) > 1:
+                    pending = matches
+                else:
+                    close = _close_member_candidates(raw, members)
+                    if close:
+                        pending = close
+                        state["info"] = [
+                            f"'{raw}'와 비슷한 팀원을 찾았어요. 아래에서 고르거나, 외부인이면 이메일을 입력해 주세요."
+                        ]
+                    else:
+                        state["errors"] = ["등록된 이름이 없습니다. 이메일 형식으로 입력해 주세요."]
         return _render_compose(
             state,
             chat_event=chat_event,
@@ -742,6 +861,16 @@ def handle_schedule_management_action(
         state["compose_step"] = "full"
         state["want_meet"] = False
         state["meet_url"] = ""
+        return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
+
+    if invoked_function == "sm_compose_remove_attendee_email":
+        # 휴가 경고의 '빼고 진행' — 그 사람만 참석자에서 빼고 같은 화면을 다시 그린다.
+        target = (parameters.get("remove_email") or "").strip().lower()
+        state["attendees"] = [
+            a for a in (state.get("attendees") or [])
+            if str(a.get("email") or "").strip().lower() != target
+        ]
+        state["errors"] = []
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_pick_room":

@@ -1,4 +1,4 @@
-"""자연어 발화 → compose 초기 state 추출 (규칙 기반)."""
+"""자연어 발화 → compose 초기 state 추출 (규칙 기반, 순수/오프라인)."""
 
 from __future__ import annotations
 
@@ -11,11 +11,48 @@ from domains.schedule_management.compose_state import (
     BUSINESS_HOUR_END,
     BUSINESS_HOUR_START,
     empty_compose_state,
+    pick_attendee_count_option,
+)
+from domains.schedule_management.mentions import (
+    apply_negation,
+    find_mentions,
+    resolve_attendees,
+    resolve_room_and_region,
 )
 
 KST = timezone(timedelta(hours=9))
 
-_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+_ATTENDEE_COUNT_RE = re.compile(r"(\d+)\s*명")
+_WEEKDAYS = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
+
+# "3시부터 5시까지", "오후 3시~5시", "15:00-17:00" — 시작·종료 두 시각과 연결어가 모두 있을 때만 범위로 본다
+# ("3시까지 잡아줘"는 데드라인이라 종료시각으로 오해하지 않는다).
+_RANGE_RE = re.compile(
+    r"(오전|오후)?\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?\s*(?:부터|에서|~|-|–)\s*"
+    r"(오전|오후)?\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?(?:\s*까지)?"
+)
+_RANGE_HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})\s*(?:~|-|–|부터)\s*(\d{1,2}):(\d{2})")
+
+# 숫자 시각이 전혀 없을 때만 쓰는 하루 구간 기본값. '오후 늦게'는 맨 '오후'(14:00)보다 먼저 봐야 한다.
+_DAYPART_DEFAULTS: tuple[tuple[str, str], ...] = (
+    ("오후 늦게", "16:00"),
+    ("오후늦게", "16:00"),
+    ("오후 일찍", "13:00"),
+    ("점심 이후", "13:00"),
+    ("점심 먹고", "13:00"),
+    ("점심먹고", "13:00"),
+    ("점심 후", "13:00"),
+    ("퇴근 전", "17:00"),
+    ("퇴근전", "17:00"),
+    ("오전 중", "10:00"),
+    ("오전중", "10:00"),
+    ("아침", "10:00"),
+    ("정오", "12:00"),
+)
+
+_FIND_SLOT_RE = re.compile(
+    r"다\s*되는\s*시간|모두\s*가능한\s*시간|아무\s*때나|시간\s*맞춰서|되는\s*시간에|가능한\s*시간에"
+)
 
 
 def _now_kst() -> datetime:
@@ -24,31 +61,39 @@ def _now_kst() -> datetime:
 
 def _extract_date(text: str, now: datetime) -> str:
     t = text
+    # '내일모레'에는 '내일'이 들어 있어 먼저 본다.
+    if "모레" in t:
+        return (now + timedelta(days=2)).strftime("%Y-%m-%d")
     if "오늘" in t:
         return now.strftime("%Y-%m-%d")
     if "내일" in t:
         return (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    if "모레" in t:
-        return (now + timedelta(days=2)).strftime("%Y-%m-%d")
     m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", t)
     if m:
         return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
     m = re.search(r"(\d{1,2})\s*월\s*(\d{1,2})\s*일", t)
     if m:
-        year = now.year
-        return f"{year}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
-    weekdays = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
-    for name, wd in weekdays.items():
+        return f"{now.year}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    m = re.search(r"(?<![\d:])(\d{1,2})/(\d{1,2})(?![\d:])", t)
+    if m and 1 <= int(m.group(1)) <= 12 and 1 <= int(m.group(2)) <= 31:
+        return f"{now.year}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+
+    days_to_next_monday = 7 - now.weekday()
+    for name, wd in _WEEKDAYS.items():
+        # 다다음주 → 다음주 순서: '다다음주 화'에는 '다음주 화'가 들어 있다.
+        if f"다다음 주 {name}" in t or f"다다음주 {name}" in t:
+            return (now + timedelta(days=days_to_next_monday + 7 + wd)).strftime("%Y-%m-%d")
         if f"다음 주 {name}" in t or f"다음주 {name}" in t:
-            days_ahead = (wd - now.weekday() + 7) % 7
-            if days_ahead == 0:
-                days_ahead = 7
-            target = now + timedelta(days=days_ahead)
-            return target.strftime("%Y-%m-%d")
+            # 다음 달력 주(월~일)의 해당 요일 — 예전 공식은 오늘(월) 기준 '다음주 화'를 내일로 계산했다.
+            return (now + timedelta(days=days_to_next_monday + wd)).strftime("%Y-%m-%d")
         if f"이번 주 {name}" in t or f"이번주 {name}" in t:
             days_ahead = (wd - now.weekday()) % 7
-            target = now + timedelta(days=days_ahead)
-            return target.strftime("%Y-%m-%d")
+            return (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    m = re.search(r"([월화수목금토일])요일", t)
+    if m:
+        wd = _WEEKDAYS[m.group(1)]
+        days_ahead = (wd - now.weekday()) % 7 or 7
+        return (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
     return ""
 
 
@@ -82,14 +127,52 @@ def _pick_business_hours_time(h: int, minute: int) -> str:
     return ""
 
 
+def _resolve_clock(h: int, minute: int, ampm: str) -> str:
+    if not (0 <= h < 24 and 0 <= minute < 60):
+        return ""
+    if ampm == "오후":
+        return _format_hhmm(h + 12 if h < 12 else h, minute)
+    if ampm == "오전":
+        return _format_hhmm(h, minute)
+    return _pick_business_hours_time(h, minute)
+
+
+def _extract_time_range(text: str) -> tuple[str, str] | None:
+    """(start, end) — 범위 표현이 있을 때만."""
+    m = _RANGE_HHMM_RE.search(text)
+    if m:
+        start = _format_hhmm(int(m.group(1)), int(m.group(2)))
+        end = _format_hhmm(int(m.group(3)), int(m.group(4)))
+        return (start, end) if _hhmm_to_minutes(end) > _hhmm_to_minutes(start) else None
+    m = _RANGE_RE.search(text)
+    if not m:
+        return None
+    start_ampm = m.group(1) or ""
+    end_ampm = m.group(4) or start_ampm
+    start = _resolve_clock(int(m.group(2)), int(m.group(3) or 0), start_ampm)
+    if not start:
+        return None
+    end_h, end_min = int(m.group(5)), int(m.group(6) or 0)
+    end = _resolve_clock(end_h, end_min, end_ampm) if end_ampm else ""
+    if not end:
+        # 오전/오후 없이 모호하면 시작보다 뒤인 가장 이른 후보.
+        later = [
+            c for c in _ambiguous_hour_candidates(end_h, end_min)
+            if _hhmm_to_minutes(c) > _hhmm_to_minutes(start)
+        ]
+        end = later[0] if later else ""
+    if not end or _hhmm_to_minutes(end) <= _hhmm_to_minutes(start):
+        return None
+    return start, end
+
+
 def _extract_time(text: str) -> str:
     m = re.search(r"(\d{1,2}):(\d{2})", text)
     if m:
         return f"{int(m.group(1)):02d}:{m.group(2)}"
     m = re.search(r"오전\s*(\d{1,2})\s*시\s*반", text)
     if m:
-        h = int(m.group(1))
-        return f"{h:02d}:30"
+        return f"{int(m.group(1)):02d}:30"
     m = re.search(r"오후\s*(\d{1,2})\s*시\s*반", text)
     if m:
         h = int(m.group(1))
@@ -103,37 +186,48 @@ def _extract_time(text: str) -> str:
             return _pick_business_hours_time(h, 30)
     m = re.search(r"오전\s*(\d{1,2})\s*시(?!간)(?:\s*(\d{1,2})\s*분)?", text)
     if m:
-        h = int(m.group(1))
-        minute = int(m.group(2) or 0)
-        return f"{h:02d}:{minute:02d}"
+        return f"{int(m.group(1)):02d}:{int(m.group(2) or 0):02d}"
     m = re.search(r"오후\s*(\d{1,2})\s*시(?!간)(?:\s*(\d{1,2})\s*분)?", text)
     if m:
         h = int(m.group(1))
         if h < 12:
             h += 12
-        minute = int(m.group(2) or 0)
-        return f"{h:02d}:{minute:02d}"
-    if "오후" in text and not re.search(r"오후\s*\d", text):
-        return "14:00"
+        return f"{h:02d}:{int(m.group(2) or 0):02d}"
     m = re.search(r"(\d{1,2})\s*시(?!간)(?:\s*(\d{1,2})\s*분)?", text)
     if m:
         h = int(m.group(1))
         minute = int(m.group(2) or 0)
         if 0 <= h < 24:
-            return _pick_business_hours_time(h, minute)
+            picked = _pick_business_hours_time(h, minute)
+            if picked:
+                return picked
+    for phrase, hhmm in _DAYPART_DEFAULTS:
+        if phrase in text:
+            return hhmm
+    if "오후" in text and not re.search(r"오후\s*\d", text):
+        return "14:00"
     return ""
 
 
 def _extract_duration_minutes(text: str) -> int | None:
-    m = re.search(r"(\d+)\s*분", text)
+    m = re.search(r"(\d+)\s*시간\s*반", text)
+    if m:
+        return int(m.group(1)) * 60 + 30
+    if re.search(r"한\s*시간\s*반", text):
+        return 90
+    m = re.search(r"(\d+)\s*시간", text)
+    if m:
+        return int(m.group(1)) * 60
+    if "한시간" in text or "한 시간" in text:
+        return 60
+    # '3시 30분'의 30분은 시각이지 소요시간이 아니다 — 시각 표현을 지운 뒤 분을 찾는다.
+    stripped = re.sub(r"\d{1,2}\s*시\s*\d{1,2}\s*분", " ", text)
+    stripped = re.sub(r"\d{1,2}:\d{2}", " ", stripped)
+    m = re.search(r"(\d+)\s*분", stripped)
     if m:
         return max(int(m.group(1)), 10)
-    if "30분" in text or "삼십분" in text:
+    if "삼십분" in text:
         return 30
-    if "1시간" in text or "한시간" in text:
-        return 60
-    if "2시간" in text:
-        return 120
     return None
 
 
@@ -144,29 +238,11 @@ def _extract_title_quoted(text: str) -> str:
     return ""
 
 
-def _match_members_by_name(text: str, members: list[dict[str, Any]]) -> list[dict[str, str]]:
-    found: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for m in members:
-        name = str(m.get("name") or "").strip()
-        email = str(m.get("email") or "").strip()
-        if not name:
-            continue
-        if name in text and email and email not in seen:
-            found.append({"name": name, "email": email})
-            seen.add(email)
-        for nick in m.get("nickname") or []:
-            nick_s = str(nick).strip()
-            if nick_s and nick_s in text and email and email not in seen:
-                found.append({"name": name, "email": email})
-                seen.add(email)
-    return found
-
-
 def extract_compose_state(
     user_message: str,
     *,
     members: list[dict[str, Any]],
+    sender_email: str = "",
 ) -> dict[str, Any]:
     state = empty_compose_state()
     text = (user_message or "").strip()
@@ -177,16 +253,26 @@ def extract_compose_state(
     date = _extract_date(text, now)
     if date:
         state["meeting_date"] = date
-    time_str = _extract_time(text)
-    if time_str:
-        state["meeting_time"] = time_str
 
-    for email in _EMAIL_RE.findall(text):
-        state["attendees"].append({"name": "", "email": email})
+    time_range = _extract_time_range(text)
+    if time_range:
+        state["meeting_time"], state["meeting_end_time"] = time_range
+        state["duration_mode"] = "custom"
+        state["duration_minutes"] = _hhmm_to_minutes(time_range[1]) - _hhmm_to_minutes(time_range[0])
+    else:
+        time_str = _extract_time(text)
+        if time_str:
+            state["meeting_time"] = time_str
 
-    for person in _match_members_by_name(text, members):
-        if not any(a.get("email") == person["email"] for a in state["attendees"]):
-            state["attendees"].append(person)
+    mentions = find_mentions(text, members, sender_email=sender_email)
+    apply_negation(text, mentions)
+    state["attendees"] = resolve_attendees(text, mentions, members)
+
+    m = _ATTENDEE_COUNT_RE.search(text)
+    if m and int(m.group(1)) > 0:
+        headcount = int(m.group(1))
+        state["attendee_headcount"] = headcount
+        state["attendee_count"] = pick_attendee_count_option(headcount)
 
     meet_kw = ("meet", "구글미트", "화상", "원격", "줌", "zoom")
     if any(k in text.lower() for k in meet_kw):
@@ -202,10 +288,20 @@ def extract_compose_state(
         state["room_name_keyword"] = "대"
     if "소회의" in text:
         state["room_name_keyword"] = "소"
+    room_name, _room_office, region = resolve_room_and_region(text, mentions)
+    if room_name:
+        # 특정 회의실 이름은 "대/소" 크기 힌트보다 정확한 신호라 덮어쓴다.
+        state["room_name_keyword"] = room_name
+    if region:
+        state["room_region"] = region
 
-    dur = _extract_duration_minutes(text)
-    if dur:
-        state["duration_minutes"] = dur
+    if _FIND_SLOT_RE.search(text):
+        state["find_slot"] = True
+
+    if not time_range:
+        dur = _extract_duration_minutes(text)
+        if dur:
+            state["duration_minutes"] = dur
 
     quoted = _extract_title_quoted(text)
     if quoted:
@@ -220,9 +316,10 @@ def extract_compose_state_with_llm_fallback(
     user_message: str,
     *,
     members: list[dict[str, Any]],
+    sender_email: str = "",
 ) -> dict[str, Any]:
     """규칙 기반 추출 후, 비어 있는 핵심 필드가 있으면 LLM 보조(선택)."""
-    state = extract_compose_state(user_message, members=members)
+    state = extract_compose_state(user_message, members=members, sender_email=sender_email)
     if os.environ.get("SCHEDULE_LLM_PREFILL", "").lower() not in ("1", "true", "yes"):
         return state
     if state.get("meeting_date") and state.get("meeting_time") and state.get("title"):

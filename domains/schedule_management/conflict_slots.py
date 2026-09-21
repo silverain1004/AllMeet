@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from config.settings import VACATION_CALENDAR_ID
 from domains.schedule_management.calendar_client import KST, freebusy_query, list_events, to_kst_iso
 from domains.schedule_management.compose_availability import (
     ComposeCalendarSnapshot,
@@ -31,6 +33,8 @@ from domains.schedule_management.rooms_group import (
     list_group_room_bookings,
 )
 from domains.schedule_management.rooms_store import get_rooms
+from domains.weekly_meeting.schedule_lookup import _name_matches_summary, lookup_vacations_for_day
+from firestore.team_config import get_all_members, get_team_config
 
 # Google freeBusy 는 요청당 items 50개 제한.
 _FREEBUSY_ITEM_LIMIT = 50
@@ -38,13 +42,14 @@ _FREEBUSY_ITEM_LIMIT = 50
 
 @dataclass
 class ConflictInfo:
-    kind: str  # booker | attendee
+    kind: str  # booker | attendee | vacation
     label: str
     event_summary: str
     start_iso: str
     end_iso: str
     html_link: str
     display_time: str = ""
+    attendee_email: str = ""  # kind == vacation: '빼고 진행' 버튼이 제거할 참석자
 
 
 @dataclass
@@ -394,43 +399,34 @@ def _freebusy_chunked(
     return busy
 
 
-def suggest_alternative_slots(
+def _slot_suggestions(
     state: dict[str, Any],
     *,
+    date: str,
+    candidates: list[str],
+    duration: int,
     access_token: str,
-    user_email: str,
-    user_name: str,
     api_calendar_id: str,
-    max_n: int = 3,
-    rooms: list[dict[str, Any]] | None = None,
-) -> list[SlotSuggestion]:
-    """대안 시간 후보를 하루치 조회 1회분으로 판정.
+    rooms: list[dict[str, Any]] | None,
+    max_n: int,
+) -> tuple[list[SlotSuggestion], int]:
+    """후보 시각들을 하루치 조회 1회분으로 판정.
 
     예전에는 후보 시각마다 `_conflicts_for_slot` + 회의실 freebusy 를 직렬로 쳐서
     후보 하나당 2~4회 왕복, 최악엔 수십 회가 순차로 쌓였다. 업무시간 전체를 한 번에
     받아 슬롯 판정은 메모리에서 하도록 바꿔 API 호출을 상수(최대 3회)로 고정한다.
+    반환: (제안 목록, free/busy 응답이 없어 '가능'으로 보였을 수 있는 참석자 수)
     """
-    bounds = _slot_bounds(state)
-    if not bounds or not access_token:
-        return []
-    _, _, date, requested_time, _ = bounds
-    work = dict(state)
-    if not str(work.get("duration_mode") or "").strip():
-        work["duration_mode"] = "1h"
-    apply_duration_mode(work)
-    duration = int(work.get("duration_minutes") or 60)
-
-    candidates = [t for t in _candidate_start_times(date, requested_time, duration) if t != requested_time]
     if not candidates:
-        return []
+        return [], 0
     try:
         day_start_iso = to_kst_iso(date, BUSINESS_HOUR_START)
         day_end_iso = to_kst_iso(date, BUSINESS_HOUR_END)
     except ValueError:
-        return []
+        return [], 0
 
     room_list = rooms if rooms is not None else get_rooms()
-    ordered = ordered_rooms_for_state(work, room_list)
+    ordered = ordered_rooms_for_state(state, room_list)
     resource_ids = [
         str(r.get("calendar_resource_id") or "").strip()
         for r in ordered
@@ -482,7 +478,7 @@ def suggest_alternative_slots(
         try:
             people_busy = f_people.result()
         except Exception:
-            return []
+            return [], 0
         try:
             room_busy = f_rooms.result()
         except Exception:
@@ -492,6 +488,9 @@ def suggest_alternative_slots(
         except Exception:
             group_bookings = []
 
+    unknown_people = sum(
+        1 for cid in people_ids if cid.lower() != booker_cal.lower() and cid not in people_busy
+    )
     people_ranges = {cid: _busy_ranges(spans) for cid, spans in people_busy.items()}
     room_ranges = {rid: _busy_ranges(spans) for rid, spans in room_busy.items()}
     attendee_count = _attendee_count_for_state(state)
@@ -540,7 +539,143 @@ def suggest_alternative_slots(
         )
         if len(suggestions) >= max_n:
             break
+    return suggestions, unknown_people
+
+
+def _work_state(state: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    work = dict(state)
+    if not str(work.get("duration_mode") or "").strip():
+        work["duration_mode"] = "1h"
+    apply_duration_mode(work)
+    return work, int(work.get("duration_minutes") or 60)
+
+
+def suggest_alternative_slots(
+    state: dict[str, Any],
+    *,
+    access_token: str,
+    user_email: str,
+    user_name: str,
+    api_calendar_id: str,
+    max_n: int = 3,
+    rooms: list[dict[str, Any]] | None = None,
+) -> list[SlotSuggestion]:
+    """요청 시각이 겹칠 때 — 같은 날 다른 시각 후보(요청 시각 제외)."""
+    bounds = _slot_bounds(state)
+    if not bounds or not access_token:
+        return []
+    _, _, date, requested_time, _ = bounds
+    work, duration = _work_state(state)
+    candidates = [t for t in _candidate_start_times(date, requested_time, duration) if t != requested_time]
+    suggestions, _ = _slot_suggestions(
+        work,
+        date=date,
+        candidates=candidates,
+        duration=duration,
+        access_token=access_token,
+        api_calendar_id=api_calendar_id,
+        rooms=rooms,
+        max_n=max_n,
+    )
     return suggestions
+
+
+def suggest_day_slots(
+    state: dict[str, Any],
+    *,
+    access_token: str,
+    api_calendar_id: str,
+    rooms: list[dict[str, Any]] | None = None,
+    max_n: int = 5,
+) -> tuple[list[SlotSuggestion], int]:
+    """시각 없이 날짜만 있을 때("팀원들 다 되는 시간에") — 업무시간 전체에서 참석자·회의실이
+    모두 비는 시각. 반환: (제안, free/busy 확인 불가 참석자 수)."""
+    date = str(state.get("meeting_date") or "").strip()
+    if not date or not access_token:
+        return [], 0
+    work, duration = _work_state(state)
+    candidates = _candidate_start_times(date, "", duration)
+    return _slot_suggestions(
+        work,
+        date=date,
+        candidates=candidates,
+        duration=duration,
+        access_token=access_token,
+        api_calendar_id=api_calendar_id,
+        rooms=rooms,
+        max_n=max_n,
+    )
+
+
+# ---------- 휴가·부재 참석자 경고 ----------
+_VACATION_TTL_SEC = 120
+_vacation_cache: dict[tuple[str, str], tuple[float, list[dict[str, str]]]] = {}
+
+
+def _vacation_events_for_calendar(calendar_id: str, date: str) -> list[dict[str, str]]:
+    key = (calendar_id, date)
+    now = time.monotonic()
+    cached = _vacation_cache.get(key)
+    if cached and (now - cached[0]) < _VACATION_TTL_SEC:
+        return list(cached[1])
+    result = lookup_vacations_for_day(calendar_id=calendar_id, date_str=date)
+    if not result.ok:
+        return []
+    events = [dict(e) for e in result.events]
+    _vacation_cache[key] = (now, events)
+    return list(events)
+
+
+def _vacation_calendar_for_team(team_id: str) -> str:
+    cfg: dict[str, Any] = {}
+    if team_id:
+        cfg = get_team_config(team_id) or {}
+    return str(cfg.get("vacation_calendar_id") or VACATION_CALENDAR_ID or "").strip()
+
+
+def vacation_conflicts(state: dict[str, Any], *, date: str) -> list[ConflictInfo]:
+    """회의 당일 휴가·부재인 참석자 — 차단이 아니라 경고(카드에서 '빼고 진행' 가능)."""
+    attendees = [
+        (str(a.get("name") or "").strip(), str(a.get("email") or "").strip())
+        for a in (state.get("attendees") or [])
+        if str(a.get("name") or "").strip() and str(a.get("email") or "").strip()
+    ]
+    if not attendees or not date:
+        return []
+    try:
+        members = get_all_members()
+    except Exception:
+        members = []
+    team_by_email = {
+        str(m.get("email") or "").strip().lower(): str(m.get("team_id") or "").strip()
+        for m in members
+        if str(m.get("email") or "").strip()
+    }
+    out: list[ConflictInfo] = []
+    seen_calendars: dict[str, list[dict[str, str]]] = {}
+    for name, email in attendees:
+        cal = _vacation_calendar_for_team(team_by_email.get(email.lower(), ""))
+        if not cal:
+            continue
+        if cal not in seen_calendars:
+            seen_calendars[cal] = _vacation_events_for_calendar(cal, date)
+        for ev in seen_calendars[cal]:
+            summary = str(ev.get("summary") or "")
+            if _name_matches_summary(name, summary):
+                out.append(
+                    ConflictInfo(
+                        kind="vacation",
+                        label=name,
+                        event_summary=summary,
+                        start_iso=str(ev.get("start") or ""),
+                        end_iso=str(ev.get("end") or ""),
+                        html_link="",
+                        display_time="",
+                        attendee_email=email,
+                    )
+                )
+                break
+    return out
 
 
 def check_schedule_conflicts(
@@ -559,8 +694,8 @@ def check_schedule_conflicts(
     bounds = _slot_bounds(state)
     if not bounds:
         return ConflictCheckResult()
-    start_iso, end_iso, _, requested_time, _ = bounds
-    conflicts = _conflicts_for_slot(
+    start_iso, end_iso, date, requested_time, _ = bounds
+    time_conflicts = _conflicts_for_slot(
         state,
         start_iso=start_iso,
         end_iso=end_iso,
@@ -571,6 +706,12 @@ def check_schedule_conflicts(
         snapshot=snapshot,
         mode=mode,
     )
+    conflicts: list[ConflictInfo] = list(time_conflicts)
+    try:
+        conflicts += vacation_conflicts(state, date=date)
+    except Exception:
+        # 휴가 조회 실패가 예약 카드 자체를 막으면 안 된다 — 경고만 빠진다.
+        pass
     result = ConflictCheckResult(
         has_conflict=bool(conflicts),
         conflicts=conflicts,
@@ -578,7 +719,8 @@ def check_schedule_conflicts(
     )
     # 간편예약(light) 단계가 기본 화면이라, 여기서 대안을 빼면 사용자는 충돌 문구만 본다.
     # 대안 탐색은 후보 수와 무관한 상수 회차라 light 에서도 감당된다.
-    if conflicts:
+    # 휴가만 있을 때는 시간을 바꿔도 소용없으니 대안을 찾지 않는다.
+    if time_conflicts:
         result.alternatives = suggest_alternative_slots(
             state,
             access_token=access_token,

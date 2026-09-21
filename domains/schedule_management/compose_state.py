@@ -31,6 +31,9 @@ def empty_compose_state() -> dict[str, Any]:
         "picked_room_id": "",
         "picked_room_name": "",
         "room_region": "",
+        "attendee_headcount": None,
+        "find_slot": False,
+        "info": [],
         "equipment_keywords": [],
         "location_keyword": "",
         "room_name_keyword": "",
@@ -45,13 +48,18 @@ def empty_compose_state() -> dict[str, Any]:
     }
 
 
-def pick_attendee_count_option(headcount: int) -> int | None:
-    """ATTENDEE_COUNT_OPTIONS 중 headcount 이상 최소값 (예: 2명 → 4)."""
+def pick_attendee_count_option(headcount: int) -> int:
+    """"N+" 버튼은 'N명 이상' — headcount 이하인 최대 옵션 (예: 5명 → 4, 12명 → 10).
+
+    최소 옵션보다 적으면 최소 옵션(예: 2명 → 4). 올림(5명 → 8)이 아니라 내림인 이유:
+    버튼 라벨이 "4+"라서 5명 회의는 사용자 눈에 '4명 이상' 칸에 속한다.
+    """
     n = max(int(headcount), 1)
+    picked = ATTENDEE_COUNT_OPTIONS[0]
     for option in ATTENDEE_COUNT_OPTIONS:
-        if option >= n:
-            return option
-    return None
+        if option <= n:
+            picked = option
+    return picked
 
 
 def sync_attendee_count_from_headcount(state: dict[str, Any]) -> None:
@@ -139,6 +147,10 @@ def state_to_button_params(state: dict[str, Any]) -> dict[str, str]:
         "picked_room_id": str(state.get("picked_room_id") or ""),
         "picked_room_name": str(state.get("picked_room_name") or ""),
         "room_region": str(state.get("room_region") or ""),
+        "attendee_headcount": (
+            str(state["attendee_headcount"]) if state.get("attendee_headcount") is not None else ""
+        ),
+        "find_slot": "1" if state.get("find_slot") else "",
         "title": str(state.get("title") or ""),
         "equipment_keywords": ",".join(state.get("equipment_keywords") or []),
         "location_keyword": str(state.get("location_keyword") or ""),
@@ -219,6 +231,13 @@ def compose_state_from(
     state["picked_room_id"] = parameters.get("picked_room_id", "")
     state["picked_room_name"] = parameters.get("picked_room_name", "")
     state["room_region"] = parameters.get("room_region", "")
+    hc_raw = parameters.get("attendee_headcount", "")
+    if hc_raw:
+        try:
+            state["attendee_headcount"] = max(int(hc_raw), 1)
+        except ValueError:
+            state["attendee_headcount"] = None
+    state["find_slot"] = parameters.get("find_slot", "") in ("1", "true", "yes")
     pipe = parameters.get("attendees_pipe", "")
     state["attendees"] = deserialize_attendees(pipe)
     eq = parameters.get("equipment_keywords", "")

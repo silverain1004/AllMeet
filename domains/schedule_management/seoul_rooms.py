@@ -14,6 +14,7 @@ SEOUL_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "세아타워(VNTG)-6층",
         "equipment": ["회의실"],
         "office": "seoul",
+        "aliases": ["발리"],
     },
     {
         "name": "VNTG 서울 Seoul (20)",
@@ -22,6 +23,8 @@ SEOUL_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "세아타워(VNTG)-6층",
         "equipment": ["회의실"],
         "office": "seoul",
+        # 지역어 '서울'과 충돌하므로 '서울' 단독은 별칭으로 두지 않는다.
+        "aliases": ["서울룸"],
     },
     {
         "name": "VNTG 서울 Hawaii (6)",
@@ -30,6 +33,7 @@ SEOUL_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "세아타워(VNTG)-7층",
         "equipment": ["회의실"],
         "office": "seoul",
+        "aliases": ["하와이"],
     },
     {
         "name": "VNTG 서울 London (8)",
@@ -38,6 +42,7 @@ SEOUL_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "세아타워(VNTG)-7층",
         "equipment": ["회의실"],
         "office": "seoul",
+        "aliases": ["런던"],
     },
     {
         "name": "VNTG 서울 Paris (6)",
@@ -46,6 +51,7 @@ SEOUL_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "세아타워(VNTG)-7층",
         "equipment": ["회의실"],
         "office": "seoul",
+        "aliases": ["파리"],
     },
 ]
 

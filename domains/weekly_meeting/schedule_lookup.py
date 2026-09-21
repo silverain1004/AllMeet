@@ -139,6 +139,33 @@ def lookup_weekly_meeting(*, team_name: str, is_next_week: bool, calendar_id: st
     return LookupResult(ok=True, events=filtered)
 
 
+VACATION_KEYWORDS: tuple[str, ...] = (
+    "휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation",
+    "리프레시", "리프레쉬", "출산", "육아", "경조", "공가", "병가",
+    "대체", "아이돌봄", "장기근속", "생일", "샌드위치", "조퇴",
+)
+
+
+def lookup_vacations_for_day(*, calendar_id: str, date_str: str) -> LookupResult:
+    """하루치 휴가 이벤트를 1회 조회 — 이름 매칭은 호출 측이 로컬로 한다.
+
+    멤버마다 q= 로 따로 조회하면 참석자 수만큼 API 를 치게 되어 예약 카드 렌더마다 쿼터를
+    태운다. 하루 전체를 한 번 받아 두고 `_name_matches_summary` 로 걸러 쓴다.
+    """
+    try:
+        start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone(timedelta(hours=9)))
+    except ValueError:
+        return LookupResult(ok=False, events=[], error_kind="bad_date")
+    end = start + timedelta(days=1)
+    result = _calendar_list_events(
+        calendar_id=calendar_id, time_min=start.isoformat(), time_max=end.isoformat()
+    )
+    if not result.ok:
+        return result
+    events = [e for e in result.events if _contains_any(e.get("summary", ""), VACATION_KEYWORDS)]
+    return LookupResult(ok=True, events=events)
+
+
 def lookup_member_vacation(
     *,
     member_keywords: list[str],
@@ -184,11 +211,7 @@ def lookup_member_vacation_range(
     """지정된 시간 범위 내 팀원 휴가 이벤트 조회."""
     matched: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    vacation_keywords = (
-        "휴가", "연차", "반차", "오전반차", "오후반차", "refresh", "vacation",
-        "리프레시", "리프레쉬", "출산", "육아", "경조", "공가", "병가",
-        "대체", "아이돌봄", "장기근속", "생일", "샌드위치", "조퇴",
-    )
+    vacation_keywords = VACATION_KEYWORDS
     for keyword in member_keywords:
         q = keyword.strip()
         if not q:

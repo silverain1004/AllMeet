@@ -15,6 +15,7 @@ GUNSAN_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "브이엔티지(군산)-3층",
         "equipment": ["빔프로젝터", "화이트보드", "노트북", "카메라", "마이크"],
         "office": "gunsan",
+        "aliases": ["브이룸", "V룸"],
     },
     {
         "name": "VNTG 군산 N-Room (12)",
@@ -23,6 +24,7 @@ GUNSAN_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "브이엔티지(군산)-3층",
         "equipment": ["모니터", "화이트보드", "노트북"],
         "office": "gunsan",
+        "aliases": ["엔룸", "N룸"],
     },
     {
         "name": "VNTG 군산 T-Room (4)",
@@ -31,6 +33,7 @@ GUNSAN_ROOM_CATALOG: list[dict[str, Any]] = [
         "location": "브이엔티지(군산)-3층",
         "equipment": ["모니터", "화이트보드"],
         "office": "gunsan",
+        "aliases": ["티룸", "T룸"],
     },
 ]
 
