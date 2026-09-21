@@ -270,13 +270,8 @@ def build_team_settings_card(
                     "label": "팀",
                     "type": "DROPDOWN",
                     "items": _team_items(teams, selected_team_id=team_id),
-                }
-            },
-            {
-                "buttonList": {
-                    "buttons": [
-                        _action_button("팀 적용", "st_team_apply"),
-                    ]
+                    # 고르는 즉시 그 팀의 설정 화면으로 — 별도 '팀 적용' 버튼 없음
+                    "onChangeAction": {"function": "st_team_apply"},
                 }
             },
         ]
@@ -533,9 +528,10 @@ def build_team_settings_card(
                             {"text": text, "value": value, "selected": region_default == value}
                             for text, value in (("전체", ""), ("서울", "seoul"), ("군산", "gunsan"))
                         ],
+                        # 고르는 즉시 저장 — 별도 저장 버튼 없음
+                        "onChangeAction": {"function": "st_room_region_save"},
                     }
                 },
-                {"buttonList": {"buttons": [_action_button("저장", "st_room_region_save")]}},
             ]
         )
     else:

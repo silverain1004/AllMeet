@@ -19,7 +19,12 @@ def test_team_settings_card_has_room_region_dropdown():
     dd = next(w for w in widgets if w.get("selectionInput", {}).get("name") == "room_region_default")
     selected = [i["value"] for i in dd["selectionInput"]["items"] if i.get("selected")]
     assert selected == ["seoul"]
-    assert "st_room_region_save" in text
+    # 고르는 즉시 저장 — 저장 버튼 대신 onChangeAction
+    assert dd["selectionInput"]["onChangeAction"]["function"] == "st_room_region_save"
+    assert not any(b.get("text") == "저장" and "st_room_region_save" in str(b) for w in widgets for b in w.get("buttonList", {}).get("buttons", []))
+    team_dd = next(w for w in widgets if w.get("selectionInput", {}).get("name") == "team_id")
+    assert team_dd["selectionInput"]["onChangeAction"]["function"] == "st_team_apply"
+    assert "팀 적용" not in text
 
 
 def test_st_room_region_save_persists_setting():
