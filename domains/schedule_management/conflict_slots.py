@@ -39,6 +39,10 @@ from firestore.team_config import get_all_members, get_team_config
 # Google freeBusy 는 요청당 items 50개 제한.
 _FREEBUSY_ITEM_LIMIT = 50
 
+# 같은 날 대안이 없을 때 넘겨 볼 영업일 수(주말 제외) — 딱 다음 주 같은 요일까지.
+# 날마다 API 최대 3회(참석자·회의실·집계 캘린더 병렬)이고 되는 날을 찾으면 바로 멈춘다.
+_ALT_LOOKAHEAD_DAYS = 5
+
 
 @dataclass
 class ConflictInfo:
@@ -560,24 +564,48 @@ def suggest_alternative_slots(
     max_n: int = 3,
     rooms: list[dict[str, Any]] | None = None,
 ) -> list[SlotSuggestion]:
-    """요청 시각이 겹칠 때 — 같은 날 다른 시각 후보(요청 시각 제외)."""
+    """요청 시각이 겹칠 때 — 같은 날 다른 시각 후보(요청 시각 제외). 같은 날이 전부 막혀
+    있으면 다음 영업일부터 최대 ``_ALT_LOOKAHEAD_DAYS`` 일까지 넘겨 본다("되는 시간이
+    없습니다"로 끝내지 않고 모두 가능한 가장 이른 시간을 준다)."""
     bounds = _slot_bounds(state)
     if not bounds or not access_token:
         return []
     _, _, date, requested_time, _ = bounds
     work, duration = _work_state(state)
-    candidates = [t for t in _candidate_start_times(date, requested_time, duration) if t != requested_time]
-    suggestions, _ = _slot_suggestions(
-        work,
-        date=date,
-        candidates=candidates,
-        duration=duration,
-        access_token=access_token,
-        api_calendar_id=api_calendar_id,
-        rooms=rooms,
-        max_n=max_n,
-    )
-    return suggestions
+
+    def _for_day(day: str, exclude_requested: bool) -> list[SlotSuggestion]:
+        cands = _candidate_start_times(day, requested_time, duration)
+        if exclude_requested:
+            cands = [t for t in cands if t != requested_time]
+        found, _ = _slot_suggestions(
+            work,
+            date=day,
+            candidates=cands,
+            duration=duration,
+            access_token=access_token,
+            api_calendar_id=api_calendar_id,
+            rooms=rooms,
+            max_n=max_n,
+        )
+        return found
+
+    suggestions = _for_day(date, exclude_requested=True)
+    if suggestions:
+        return suggestions
+    try:
+        cursor = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return []
+    looked = 0
+    while looked < _ALT_LOOKAHEAD_DAYS:
+        cursor += timedelta(days=1)
+        if cursor.weekday() >= 5:
+            continue
+        looked += 1
+        suggestions = _for_day(cursor.strftime("%Y-%m-%d"), exclude_requested=False)
+        if suggestions:
+            return suggestions
+    return []
 
 
 def suggest_day_slots(

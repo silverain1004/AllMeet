@@ -44,7 +44,9 @@ def test_st_calendar_test_shows_success_message():
                 )
     body = str(out)
     assert "정상적으로 연결되었습니다" in body
-    assert "2026-06-10" in body
+    # 연동 테스트는 연결 여부만 알려준다 — 주간회의 일자 툴팁은 뺐다.
+    assert "2026-06-10" not in body
+    assert "주간회의 일자" not in body
 
 
 def test_legacy_wm_open_team_menu_redirects():

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from domains.schedule_management.cards import (
+    TEAM_SUGGESTION_SUFFIX,
     build_booking_confirmed_card,
     build_compose_card,
     build_result_card,
@@ -775,6 +776,8 @@ def handle_schedule_management_action(
             return _render_compose(
                 state, chat_event=chat_event, include_action_response=True, members=members
             )
+        if raw.endswith(TEAM_SUGGESTION_SUFFIX):
+            raw = raw[: -len(TEAM_SUGGESTION_SUFFIX)].strip()
         name_hint, email_hint = _parse_attendee_raw(raw)
         if email_hint:
             entry = {"name": name_hint, "email": email_hint}
@@ -864,8 +867,14 @@ def handle_schedule_management_action(
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_remove_attendee_email":
-        # 휴가 경고의 '빼고 진행' — 그 사람만 참석자에서 빼고 같은 화면을 다시 그린다.
-        target = (parameters.get("remove_email") or "").strip().lower()
+        # 휴가 경고의 '빼고 진행'(파라미터) 또는 참석자 드롭다운 '제거'(폼 값) — 그 사람만 빼고 다시 그린다.
+        target = (
+            (parameters.get("remove_email") or "").strip()
+            or _safe_form_value(form_inputs, "remove_attendee_email")
+        ).strip().lower()
+        if not target:
+            state["errors"] = ["제거할 참석자를 선택해 주세요."]
+            return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
         state["attendees"] = [
             a for a in (state.get("attendees") or [])
             if str(a.get("email") or "").strip().lower() != target

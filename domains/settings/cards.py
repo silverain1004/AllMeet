@@ -626,8 +626,8 @@ def build_room_region_card(*, include_action_response: bool = False) -> dict[str
         {
             "buttonList": {
                 "buttons": [
-                    _action_button("군산", "st_rooms_view_gunsan", parameters={"region": "gunsan"}),
                     _action_button("서울", "st_rooms_view_seoul", parameters={"region": "seoul"}),
+                    _action_button("군산", "st_rooms_view_gunsan", parameters={"region": "gunsan"}),
                     _action_button("설정으로", "hm_open_settings"),
                 ]
             }

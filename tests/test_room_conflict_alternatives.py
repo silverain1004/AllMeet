@@ -141,8 +141,10 @@ def test_no_conflict_does_not_search_alternatives(stub_calendar, monkeypatch):
     assert searched == []
 
 
-def test_fully_booked_day_yields_no_alternatives(stub_calendar):
-    """업무시간이 전부 차 있으면 대안은 빈 리스트."""
+def test_fully_booked_day_looks_ahead_to_next_business_day(stub_calendar):
+    """요청일 업무시간이 전부 차 있으면 '없다'로 끝내지 않고 다음 영업일의 가능한 시간을 준다."""
+    from datetime import datetime
+
     from domains.schedule_management.conflict_slots import suggest_alternative_slots
 
     stub_calendar.busy[HONG] = [_span("08:00", "19:00")]
@@ -156,7 +158,9 @@ def test_fully_booked_day_yields_no_alternatives(stub_calendar):
         rooms=[ROOM_N],
     )
 
-    assert found == []
+    assert found
+    assert all(s.meeting_date != DATE for s in found)
+    assert all(datetime.strptime(s.meeting_date, "%Y-%m-%d").weekday() < 5 for s in found)
 
 
 def test_day_freebusy_is_cached_across_calls(stub_calendar):

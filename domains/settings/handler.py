@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from domains.settings.cards import (
@@ -120,22 +119,8 @@ def _calendar_test_message(team_name: str, calendar_id: str) -> str:
         return "캘린더를 찾을 수 없습니다."
     if not result.ok:
         return "캘린더 연동 중 오류가 발생했습니다."
-    if not result.events:
-        return f"{team_name} 주간회의일자를 찾을 수 없습니다."
-    first = result.events[0]
-    start = str(first.get("start") or "").strip()
-    date_text = start[:10] if len(start) >= 10 else start
-    try:
-        if start.endswith("Z"):
-            start = start[:-1] + "+00:00"
-        dt = datetime.fromisoformat(start)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone(timedelta(hours=9)))
-        dt = dt.astimezone(timezone(timedelta(hours=9)))
-        date_text = dt.strftime("%Y-%m-%d")
-    except ValueError:
-        pass
-    return f"정상적으로 연결되었습니다.<br>{team_name} 주간회의 일자는 {date_text}입니다."
+    # 연결 확인만 — 이번 주에 회의가 없어도 캘린더 연동 자체는 정상이다.
+    return "정상적으로 연결되었습니다."
 
 
 def handle_settings_action(

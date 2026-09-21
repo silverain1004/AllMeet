@@ -249,11 +249,14 @@ def _duration_radio_widget(state: dict[str, Any], base_params: dict[str, str]) -
 
 def _time_row_widget(state: dict[str, Any], base_params: dict[str, str]) -> dict[str, Any]:
     mode = str(state.get("duration_mode") or "").strip()
+    # Chat 드롭다운은 펼칠 때 스크롤 위치를 제어할 수 없어 항목 수를 줄인다(67→23개).
+    # 직접입력 모드에서만 10분 단위. 목록에 없는 값(자연어 "3시 10분")은 제자리에 끼운다.
+    step = 10 if mode == "custom" else 30
     sel_time = str(state.get("meeting_time") or "")
-    start = _time_dropdown("meeting_time", "시작 시간", sel_time, base_params)
+    start = _time_dropdown("meeting_time", "시작 시간", sel_time, base_params, step_min=step)
     if mode == "custom":
         sel_end = str(state.get("meeting_end_time") or "")
-        end = _time_dropdown("meeting_end_time", "종료 시간", sel_end, base_params)
+        end = _time_dropdown("meeting_end_time", "종료 시간", sel_end, base_params, step_min=step)
     else:
         end_label = resolve_end_time(state) or "-"
         end = {"textParagraph": {"text": f"종료 시간: {html.escape(end_label)}"}}
@@ -265,10 +268,16 @@ def _time_dropdown(
     label: str,
     selected: str,
     base_params: dict[str, str],
+    *,
+    step_min: int = 30,
 ) -> dict[str, Any]:
-    items = _time_options()
+    items = _time_options(step_min=step_min)
     if selected and not any(item.get("value") == selected for item in items):
-        items.append({"text": selected, "value": selected, "selected": True})
+        pos = next(
+            (i for i, item in enumerate(items) if item.get("value") and item["value"] > selected),
+            len(items),
+        )
+        items.insert(pos, {"text": selected, "value": selected, "selected": True})
     else:
         for item in items:
             if item.get("value") == selected:
@@ -284,9 +293,17 @@ def _time_dropdown(
     }
 
 
+TEAM_SUGGESTION_SUFFIX = " (팀 전원 추가)"
+
+
 def _member_suggestion_items(members: list[dict[str, Any]]) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     seen: set[str] = set()
+    for m in members:
+        team_name = str(m.get("team_name") or "").strip()
+        if team_name and team_name not in seen:
+            items.append({"text": f"{team_name}{TEAM_SUGGESTION_SUFFIX}"})
+            seen.add(team_name)
     for m in members:
         name = str(m.get("name") or "").strip()
         email = str(m.get("email") or "").strip()
@@ -609,36 +626,56 @@ def _attendee_chip_buttons(
     state: dict[str, Any],
     base_params: dict[str, str],
 ) -> list[dict[str, Any]]:
+    """추가된 참석자 목록 + 제거 드롭다운.
+
+    예전엔 참석자마다 'x' 버튼을 두고 버튼마다 전체 상태(참석자 목록 포함)를 파라미터로 실어,
+    팀 두 개(13명)만 넣어도 카드가 48KB 로 Chat 한도(~32KB)를 넘겨 "요청을 처리할 수 없음"이
+    났다. 상태 파라미터를 가진 버튼은 하나만 두고 대상은 드롭다운으로 고른다.
+    """
     widgets: list[dict[str, Any]] = []
     attendees = state.get("attendees") or []
     if not attendees:
         return widgets
-    buttons: list[dict[str, Any]] = []
-    for idx, person in enumerate(attendees):
+    labels: list[str] = []
+    items: list[dict[str, Any]] = []
+    for person in attendees:
         name = str(person.get("name") or "").strip()
         email = str(person.get("email") or "").strip()
-        if name and email:
-            label = f"{name}({email}) x"
-        elif email:
-            label = f"{email} x"
-        else:
-            label = f"{name} x"
-        params = dict(base_params)
-        params["remove_index"] = str(idx)
-        buttons.append(
-            {
-                "text": label[:80],
-                "onClick": {
-                    "action": {
-                        "function": "sm_compose_remove_attendee",
-                        "parameters": _params_list(params),
-                    }
-                },
+        if not email and not name:
+            continue
+        label = f"{name}({email})" if name and email else (email or name)
+        labels.append(html.escape(name or email))
+        items.append({"text": label[:80], "value": email or name})
+    widgets.append(
+        {
+            "textParagraph": {
+                "text": f"<b>추가된 참석자 {len(items)}명</b><br>" + ", ".join(labels)
             }
+        }
+    )
+    widgets.append(
+        _columns_widget_buttons(
+            {
+                "selectionInput": {
+                    "name": "remove_attendee_email",
+                    "label": "제거할 참석자",
+                    "type": "DROPDOWN",
+                    "items": items,
+                }
+            },
+            [
+                {
+                    "text": "제거",
+                    "onClick": {
+                        "action": {
+                            "function": "sm_compose_remove_attendee_email",
+                            "parameters": _params_list(base_params),
+                        }
+                    },
+                }
+            ],
         )
-    if buttons:
-        widgets.append({"textParagraph": {"text": "<b>추가된 참석자</b>"}})
-        widgets.append({"buttonList": {"buttons": buttons}})
+    )
     return widgets
 
 
@@ -772,11 +809,27 @@ def _room_widgets(
     return widgets
 
 
-def _slot_buttons(slots: list[Any], base_params: dict[str, str]) -> dict[str, Any]:
+def _slot_day_prefix(slot_date: str, current_date: str) -> str:
+    """다른 날 후보면 '9/23(수) ' 를 앞에 붙인다."""
+    if not slot_date or slot_date == current_date:
+        return ""
+    try:
+        d = datetime.strptime(slot_date, "%Y-%m-%d")
+    except ValueError:
+        return f"{slot_date} "
+    return f"{d.month}/{d.day}({_WEEKDAYS_KO[d.weekday()]}) "
+
+
+def _slot_buttons(
+    slots: list[Any],
+    base_params: dict[str, str],
+    *,
+    current_date: str = "",
+) -> dict[str, Any]:
     buttons: list[dict[str, Any]] = []
     for slot in slots:
         room = html.escape(str(slot.top_room_name or "회의실"))
-        label = f"{slot.meeting_time}~{slot.meeting_end_time} · {room}"
+        label = f"{_slot_day_prefix(slot.meeting_date, current_date)}{slot.meeting_time}~{slot.meeting_end_time} · {room}"
         params = dict(base_params)
         params.update(
             {
@@ -811,7 +864,7 @@ def _day_slot_widgets(
         {"textParagraph": {"text": "<b>참석자·회의실 모두 가능한 시간</b>"}},
     ]
     if day_slots:
-        widgets.append(_slot_buttons(day_slots, base_params))
+        widgets.append(_slot_buttons(day_slots, base_params, current_date=str(base_params.get("meeting_date") or "")))
     if note:
         widgets.append({"textParagraph": {"text": f'<font color="#9aa0a6">{html.escape(note)}</font>'}})
     return widgets
@@ -883,16 +936,24 @@ def _conflict_widgets(
 
     if time_conflicts:
         alternatives = conflict_check.alternatives or []
+        current_date = str(state.get("meeting_date") or "")
         if alternatives:
-            widgets.append({"textParagraph": {"text": "<b>이 시간은 회의실도 가능해요</b>"}})
-            widgets.append(_slot_buttons(alternatives, base_params))
+            other_day = any(str(getattr(s, "meeting_date", "") or "") != current_date for s in alternatives)
+            header = (
+                "이날은 모두 되는 시간이 없어요 — 가장 가까운 날의 가능한 시간"
+                if other_day
+                else "참석자·회의실 모두 가능한 시간"
+            )
+            widgets.append({"textParagraph": {"text": f"<b>{header}</b>"}})
+            widgets.append(_slot_buttons(alternatives, base_params, current_date=current_date))
         else:
             # 대안이 없을 때 충돌 문구만 남기면 "그래서 언제 잡으라는 건지" 를 알 수 없다.
             widgets.append(
                 {
                     "textParagraph": {
                         "text": (
-                            f"{BUSINESS_HOUR_START}~{BUSINESS_HOUR_END} 사이에는 "
+                            "요청일부터 5영업일 안에는 "
+                            f"{BUSINESS_HOUR_START}~{BUSINESS_HOUR_END} 사이에 "
                             "참석자와 회의실이 모두 되는 시간이 없습니다"
                         )
                     }
