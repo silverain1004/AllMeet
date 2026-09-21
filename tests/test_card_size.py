@@ -28,6 +28,7 @@ def _mock_network(monkeypatch, handler, members):
     monkeypatch.setattr(handler, "get_rooms", lambda: [])
     monkeypatch.setattr(handler, "is_oauth_linked", lambda email: False)
     monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    monkeypatch.setattr(handler, "_team_default_region", lambda email: "")
     monkeypatch.setattr(
         handler, "_calendar_options", lambda chat_event, linked=None: [{"id": "primary", "label": "내 캘린더"}]
     )
@@ -54,7 +55,8 @@ def test_adding_three_teams_in_a_row_stays_under_chat_card_limit(monkeypatch):
 
     members = _members()
     _mock_network(monkeypatch, handler, members)
-    state = handler.compose_state_from({"compose_step": "full"}, {})
+    # 참석자 편집은 간편 예약(첫 카드)에 있다 — 그 카드가 한도 안에 들어야 한다
+    state = handler.compose_state_from({"compose_step": "quick"}, {})
     params = handler.state_to_button_params(state)
     for team in ("ERP2팀", "PC2팀", "MES2팀 (팀 전원 추가)"):
         out = handler.handle_schedule_management_action(

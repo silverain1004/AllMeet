@@ -510,6 +510,38 @@ def build_team_settings_card(
         cal_block.append({"textParagraph": {"text": "팀을 선택해 주세요."}})
     widgets.extend(_divider_block("팀 캘린더", cal_block))
 
+    # --- 회의실 지역 기본값 ---
+    region_default = str((team_config or {}).get("room_region_default") or "").strip()
+    region_block: list[dict[str, Any]] = []
+    if team_config:
+        region_block.extend(
+            [
+                {
+                    "textParagraph": {
+                        "text": (
+                            "예약 카드에서 회의실 지역을 고를 때, Google Calendar 근무 위치가 없는 "
+                            "팀원에게 기본으로 보여줄 지역입니다. (근무 위치가 있으면 그쪽이 우선)"
+                        )
+                    }
+                },
+                {
+                    "selectionInput": {
+                        "name": "room_region_default",
+                        "label": "기본 지역",
+                        "type": "DROPDOWN",
+                        "items": [
+                            {"text": text, "value": value, "selected": region_default == value}
+                            for text, value in (("전체", ""), ("서울", "seoul"), ("군산", "gunsan"))
+                        ],
+                    }
+                },
+                {"buttonList": {"buttons": [_action_button("저장", "st_room_region_save")]}},
+            ]
+        )
+    else:
+        region_block.append({"textParagraph": {"text": "팀을 선택해 주세요."}})
+    widgets.extend(_divider_block("회의실 지역 기본값", region_block))
+
     widgets.append(_back_settings_button())
 
     out = _wrap_card(

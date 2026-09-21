@@ -161,6 +161,7 @@ def test_remove_attendee_email_action(monkeypatch):
     monkeypatch.setattr(handler, "get_rooms", lambda: [])
     monkeypatch.setattr(handler, "is_oauth_linked", lambda email: False)
     monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    monkeypatch.setattr(handler, "_team_default_region", lambda email: "")
     monkeypatch.setattr(
         handler, "_calendar_options", lambda chat_event, linked=None: [{"id": "primary", "label": "내 캘린더"}]
     )

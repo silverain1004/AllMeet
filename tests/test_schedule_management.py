@@ -76,6 +76,7 @@ def test_handler_sm_compose_add_attendee_bulk_adds_team(monkeypatch):
     monkeypatch.setattr(handler, "get_rooms", lambda: [])
     monkeypatch.setattr(handler, "is_oauth_linked", lambda email: False)
     monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    monkeypatch.setattr(handler, "_team_default_region", lambda email: "")
     monkeypatch.setattr(
         handler, "_calendar_options", lambda chat_event, linked=None: [{"id": "primary", "label": "내 캘린더"}]
     )
@@ -258,7 +259,8 @@ def test_attendee_count_button_selection_filled():
     state["attendee_count"] = 8
     out = build_quick_compose_card(state, recommended_rooms=[])
     widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
-    buttons = widgets[2]["buttonList"]["buttons"]
+    # [0..4] = date header/picker + attendee header/input/tip
+    buttons = widgets[5]["buttonList"]["buttons"]
     filled = [b for b in buttons if b.get("type") == "FILLED"]
     assert len(filled) == 1
     assert filled[0]["text"] == "8+"
@@ -376,11 +378,12 @@ def test_quick_compose_card_widgets():
     assert picker["timezoneOffsetDate"] == 540
     assert picker["onChangeAction"]["function"] == "sm_compose_quick_update"
     assert "onChangeAction" not in widgets[1]
-    ac_buttons = widgets[2]["buttonList"]["buttons"]
+    # [2..4] = attendee block (header, input row, tip) — moved to the first card
+    ac_buttons = widgets[5]["buttonList"]["buttons"]
     assert [b["text"] for b in ac_buttons] == ["4+", "8+", "10+", "15+"]
     assert not any(b.get("type") == "FILLED" for b in ac_buttons)
-    assert "columns" in widgets[3]
-    radio = widgets[4]["selectionInput"]
+    assert "columns" in widgets[6]
+    radio = widgets[7]["selectionInput"]
     assert radio["type"] == "RADIO_BUTTON"
     assert not any(item.get("selected") for item in radio["items"])
     assert not any(
@@ -541,7 +544,8 @@ def test_member_suggestion_items_name_email_only():
 
 
 def test_full_compose_card_has_suggestions():
-    from domains.schedule_management.cards import build_full_compose_card
+    """참석자 편집(입력란·제안)은 간편 예약(첫 카드)에, 본 예약 카드에는 요약만."""
+    from domains.schedule_management.cards import build_full_compose_card, build_quick_compose_card
     from domains.schedule_management.compose_state import empty_compose_state
 
     state = empty_compose_state()
@@ -550,6 +554,7 @@ def test_full_compose_card_has_suggestions():
     state["picked_room_name"] = "대회의실"
     state["meeting_date"] = "2026-05-10"
     state["meeting_time"] = "10:00"
+    state["attendees"] = [{"name": "김철수", "email": "kim@x.com"}]
     members = [{"name": "김철수", "email": "kim@x.com", "nickname": []}]
     out = build_full_compose_card(
         state,
@@ -558,6 +563,10 @@ def test_full_compose_card_has_suggestions():
     )
     assert out["cardsV2"][0]["cardId"] == "sm_compose_full"
     widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
+    assert "참석자 1명" in str(widgets) and "attendee_input" not in str(widgets)
+
+    quick = build_quick_compose_card(state, recommended_rooms=[], room_preview_ready=False, members=members)
+    quick_widgets = quick["cardsV2"][0]["card"]["sections"][0]["widgets"]
     def _find_attendee_input(widget_list: list[dict]) -> dict | None:
         for w in widget_list:
             if w.get("textInput", {}).get("name") == "attendee_input":
@@ -569,13 +578,13 @@ def test_full_compose_card_has_suggestions():
                         return found
         return None
 
-    attendee_field = _find_attendee_input(widgets)
+    attendee_field = _find_attendee_input(quick_widgets)
     assert attendee_field
     assert "initialSuggestions" in attendee_field
     assert "label" not in attendee_field
     assert "placeholderText" not in attendee_field
     attendee_columns = [
-        w for w in widgets if "columns" in w and any(
+        w for w in quick_widgets if "columns" in w and any(
             "attendee_input" in str(col)
             for col in w["columns"]["columnItems"]
         )
@@ -1243,7 +1252,26 @@ def test_resolve_room_region_unknown_shows_all(monkeypatch):
     from domains.schedule_management import handler
 
     monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    monkeypatch.setattr(handler, "_team_default_region", lambda email: "")
     state = {"room_region": "", "meeting_date": "2026-05-10"}
+    assert handler._resolve_room_region(state, "user@x.com") == ("", "all")
+
+
+def test_resolve_room_region_falls_back_to_team_default(monkeypatch):
+    """근무 위치 미상 → 팀 설정의 기본 지역. 근무 위치가 있으면 그쪽이 우선."""
+    from domains.schedule_management import handler
+
+    monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    monkeypatch.setattr(handler, "find_team_by_email", lambda email: "PC2")
+    monkeypatch.setattr(handler, "get_team_config", lambda tid: {"room_region_default": "seoul"})
+    state = {"room_region": "", "meeting_date": "2026-05-10"}
+    assert handler._resolve_room_region(state, "user@x.com") == ("seoul", "seoul")
+
+    monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "gunsan")
+    assert handler._resolve_room_region(state, "user@x.com") == ("gunsan", "gunsan")
+
+    monkeypatch.setattr(handler, "detect_office_for_date", lambda email, date: "")
+    monkeypatch.setattr(handler, "get_team_config", lambda tid: {"room_region_default": ""})
     assert handler._resolve_room_region(state, "user@x.com") == ("", "all")
 
 

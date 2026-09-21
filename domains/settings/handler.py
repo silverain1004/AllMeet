@@ -528,6 +528,30 @@ def handle_settings_action(
             include_action_response=True,
         )
 
+    # 회의실 지역 기본값 저장
+    if fn == "st_room_region_save":
+        team_id = _safe_team_id(form_inputs, parameters)
+        existing, team_name = _team_required(team_id)
+        if not existing:
+            return {"text": "팀을 선택해 주세요."}
+        raw = _safe_form_value(form_inputs, "room_region_default")
+        value = raw if raw in ("seoul", "gunsan") else ""
+        upsert_team_config(
+            team_id=team_id,
+            team_name=team_name,
+            space_id=space_id,
+            user_context=user_context,
+            updates={"room_region_default": value},
+        )
+        teams = get_team_list()
+        label = {"seoul": "서울", "gunsan": "군산"}.get(value, "전체")
+        return _render_team_card(
+            teams=teams,
+            ctx_team_id=team_id,
+            status_message=f"<b>{html.escape(str(team_name))} 회의실 기본 지역</b> — {label}",
+            include_action_response=True,
+        )
+
     # 캘린더 저장
     if fn == "st_calendar_save":
         team_id = _safe_team_id(form_inputs, parameters)

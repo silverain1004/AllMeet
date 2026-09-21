@@ -36,10 +36,12 @@ TEAM_ROW_FIXED_FIELDS = {
     "shared_drive_ids",
     "template_page_url",
     "template_page_id",
+    "room_region_default",
 }
 TEAM_SETTING_FIELDS = {
     "calendar_id",
     "vacation_calendar_id",
+    "room_region_default",  # 회의실 기본 지역: "" | "seoul" | "gunsan" (근무 위치 미상일 때 폴백)
     "confluence_space_key",
     "report_root_page_id",
     "space_key",
@@ -166,6 +168,7 @@ def _empty_team_row(team_id: str, team_name: str) -> dict[str, Any]:
         "name": (team_name or team_id).strip() or team_id,
         "calendar_id": "",
         "vacation_calendar_id": "",
+        "room_region_default": "",
         "space_key": "",
         "confluence_space_key": "",
         "report_root_page_id": "",
@@ -189,7 +192,7 @@ def _normalize_team_row(row: dict[str, Any], *, team_id: str, team_name: str) ->
         if isinstance(base.get("shared_drive_ids"), list)
         else []
     )
-    for key in ("calendar_id", "vacation_calendar_id", "space_key", "confluence_space_key", "report_root_page_id", "template_page_url", "template_page_id"):
+    for key in ("calendar_id", "vacation_calendar_id", "room_region_default", "space_key", "confluence_space_key", "report_root_page_id", "template_page_url", "template_page_id"):
         base[key] = str(base.get(key) or "").strip()
     return base
 

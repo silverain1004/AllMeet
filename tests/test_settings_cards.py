@@ -92,12 +92,13 @@ def test_team_settings_card_has_four_dividers():
         {"team_name": "PC2팀", "team_members": [], "shared_drive_ids": [], "calendar_id": "primary"},
         team_id="PC2",
     )
-    assert _divider_count(card) == 4
+    assert _divider_count(card) == 5
     paragraphs = _paragraph_texts(card)
     assert sum(1 for t in paragraphs if "팀원" in t and "<b>" in t) == 1
     assert sum(1 for t in paragraphs if "컨플루언스" in t and "<b>" in t) == 1
     assert sum(1 for t in paragraphs if "팀 드라이브" in t and "<b>" in t) == 1
     assert sum(1 for t in paragraphs if "팀 캘린더" in t and "<b>" in t) == 1
+    assert sum(1 for t in paragraphs if "회의실 지역 기본값" in t and "<b>" in t) == 1
     assert card["cardsV2"][0]["cardId"] == "st_team_settings"
 
 

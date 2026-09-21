@@ -984,6 +984,55 @@ def _conflict_widgets(
     return widgets
 
 
+def _attendee_block(
+    state: dict[str, Any],
+    base_params: dict[str, str],
+    members: list[dict[str, Any]],
+    pending_candidates: list[dict[str, str]] | None,
+) -> list[dict[str, Any]]:
+    """참석자 목록/제거 + 추가 입력란(팀 제안 포함). 참석자 수가 회의실 추천을 좌우하므로
+    간편 예약(첫 카드)에 둔다."""
+    widgets: list[dict[str, Any]] = []
+    widgets.append({"textParagraph": {"text": "<b>참석자</b>"}})
+    widgets.extend(_attendee_chip_buttons(state, base_params))
+    if pending_candidates:
+        widgets.extend(_candidate_buttons(pending_candidates, base_params))
+
+    attendee_input: dict[str, Any] = {
+        "name": "attendee_input",
+    }
+    suggestions = _member_suggestion_items(members)
+    if suggestions:
+        attendee_input["initialSuggestions"] = {"items": suggestions}
+    widgets.append(
+        _columns_widget_buttons(
+            {"textInput": attendee_input},
+            [
+                {
+                    "text": "+ 추가",
+                    "onClick": {
+                        "action": {
+                            "function": "sm_compose_add_attendee",
+                            "parameters": _params_list(base_params),
+                        }
+                    },
+                }
+            ],
+        )
+    )
+    widgets.append(
+        {
+            "textParagraph": {
+                "text": (
+                    '<font color="#9aa0a6">💡 팀명(예: PC2팀)만 입력하면 팀원 전체가 추가돼요</font>'
+                )
+            }
+        }
+    )
+
+    return widgets
+
+
 def build_quick_compose_card(
     state: dict[str, Any],
     *,
@@ -993,6 +1042,8 @@ def build_quick_compose_card(
     room_region_active: str = "all",
     day_slots: list[Any] | None = None,
     day_slots_note: str = "",
+    members: list[dict[str, Any]] | None = None,
+    pending_candidates: list[dict[str, str]] | None = None,
     include_action_response: bool = False,
 ) -> dict[str, Any]:
     base_params = state_to_button_params(state)
@@ -1002,6 +1053,7 @@ def build_quick_compose_card(
     widgets.extend(_conflict_widgets(conflict_check, state, base_params))
     date_val = str(state.get("meeting_date") or "")
     widgets.extend(_meeting_date_widgets(date_val, base_params))
+    widgets.extend(_attendee_block(state, base_params, members or [], pending_candidates))
     widgets.append(_attendee_count_button_widget(state, base_params))
     widgets.extend(_headcount_note_widgets(state))
     widgets.append(_time_row_widget(state, base_params))
@@ -1092,43 +1144,20 @@ def build_full_compose_card(
 
     widgets.append({"textInput": {"name": "title", "label": "제목", "value": str(state.get("title") or "")}})
 
-    widgets.append({"textParagraph": {"text": "<b>참석자</b>"}})
-    widgets.extend(_attendee_chip_buttons(state, base_params))
-    if pending_candidates:
-        widgets.extend(_candidate_buttons(pending_candidates, base_params))
-
-    attendee_input: dict[str, Any] = {
-        "name": "attendee_input",
-    }
-    suggestions = _member_suggestion_items(members)
-    if suggestions:
-        attendee_input["initialSuggestions"] = {"items": suggestions}
-    widgets.append(
-        _columns_widget_buttons(
-            {"textInput": attendee_input},
-            [
-                {
-                    "text": "+ 추가",
-                    "onClick": {
-                        "action": {
-                            "function": "sm_compose_add_attendee",
-                            "parameters": _params_list(base_params),
-                        }
-                    },
+    attendee_names = [
+        str(a.get("name") or a.get("email") or "").strip()
+        for a in (state.get("attendees") or [])
+        if str(a.get("name") or a.get("email") or "").strip()
+    ]
+    if attendee_names:
+        widgets.append(
+            {
+                "textParagraph": {
+                    "text": f"<b>참석자 {len(attendee_names)}명</b><br>"
+                    + html.escape(", ".join(attendee_names))
                 }
-            ],
-        )
-    )
-    widgets.append(
-        {
-            "textParagraph": {
-                "text": (
-                    '<font color="#9aa0a6">💡 팀명(예: PC2팀)만 입력하면 팀원 전체가 추가돼요</font>'
-                )
             }
-        }
-    )
-
+        )
     want_meet = bool(state.get("want_meet") or state.get("auto_meet"))
     meet_url = str(state.get("meet_url") or "")
     if want_meet and not meet_url:
@@ -1257,5 +1286,7 @@ def build_compose_card(
         room_region_active=room_region_active,
         day_slots=day_slots,
         day_slots_note=day_slots_note,
+        members=members or [],
+        pending_candidates=pending_candidates,
         include_action_response=include_action_response,
     )

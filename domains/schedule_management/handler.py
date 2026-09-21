@@ -69,6 +69,7 @@ from domains.schedule_management.rooms_sync import sync_resource_rooms_from_cale
 from domains.schedule_management.working_location import detect_office_for_date
 from domains.weekly_meeting.oauth_callback import build_authorization_url, encode_state
 from firestore.team_config import (
+    find_team_by_email,
     get_all_members,
     get_team_config,
     get_team_list,
@@ -269,7 +270,20 @@ def _resolve_room_region(state: dict[str, Any], email: str) -> tuple[str, str]:
         return explicit, explicit
     date = str(state.get("meeting_date") or "").strip() or datetime.now(KST).strftime("%Y-%m-%d")
     detected = detect_office_for_date(email, date) if email else ""
+    if not detected and email:
+        # 근무 위치가 없는 사람은 팀 설정의 기본 지역으로 — 그것도 없으면 전체.
+        detected = _team_default_region(email)
     return detected, (detected or "all")
+
+
+def _team_default_region(email: str) -> str:
+    try:
+        team_id = find_team_by_email(email)
+        cfg = get_team_config(team_id) if team_id else None
+    except Exception:
+        return ""
+    value = str((cfg or {}).get("room_region_default") or "").strip()
+    return value if value in ("gunsan", "seoul") else ""
 
 
 def _room_by_id(room_id: str) -> dict[str, Any] | None:
@@ -767,7 +781,6 @@ def handle_schedule_management_action(
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_add_attendee":
-        state["compose_step"] = "full"
         raw = _safe_form_value(form_inputs, "attendee_input")
         state["errors"] = []
         state["info"] = []
@@ -836,7 +849,6 @@ def handle_schedule_management_action(
         )
 
     if invoked_function == "sm_compose_pick_attendee":
-        state["compose_step"] = "full"
         email = parameters.get("pick_email", "").strip()
         name = parameters.get("pick_name", "").strip()
         if email and not any(a.get("email") == email for a in state.get("attendees") or []):
@@ -844,7 +856,6 @@ def handle_schedule_management_action(
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_remove_attendee":
-        state["compose_step"] = "full"
         try:
             idx = int(parameters.get("remove_index", "-1"))
         except ValueError:
