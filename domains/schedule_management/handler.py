@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 import time
 from datetime import datetime, timedelta
@@ -76,6 +77,8 @@ from firestore.team_config import (
     normalize_team_id,
     update_team_calendar_id,
 )
+
+logger = logging.getLogger(__name__)
 
 _CALENDAR_OPTIONS_TTL_SEC = 300
 _CALENDAR_OPTIONS_CACHE: dict[tuple[str, bool], tuple[float, list[dict[str, str]]]] = {}
@@ -576,6 +579,22 @@ def handle_schedule_management(
         out["text"] = "등록된 회의실 목록입니다."
         return out
 
+    # 자연어 예약은 LLM 추출 + 캘린더/Firestore 조회가 겹쳐 콜드스타트 때 수 초 이상 걸린다.
+    # 스페이스가 있는 MESSAGE 면 로딩 문구를 먼저 보내고 카드는 백그라운드로 밀어 넣는다
+    # (무응답처럼 보이지 않게). 카드 클릭·테스트처럼 스페이스가 없으면 동기 응답.
+    space_name = _space_id(chat_event)
+    if space_name and (chat_event or {}).get("type") == "MESSAGE":
+        from api.chat.loading import loading_text, start_background
+
+        start_background(_run_compose_background, user_message, chat_event, space_name)
+        return loading_text("예약 카드를 준비하는 중이에요…")
+    return _build_compose_from_message(user_message, chat_event)
+
+
+def _build_compose_from_message(
+    user_message: str,
+    chat_event: dict[str, Any] | None,
+) -> dict[str, Any]:
     members = get_all_members()
     extracted = extract_compose_state_with_llm_fallback(
         user_message,
@@ -590,6 +609,28 @@ def handle_schedule_management(
     out = _render_compose(state, chat_event=chat_event, members=members)
     out["text"] = "간편 예약 화면입니다."
     return out
+
+
+def _run_compose_background(
+    user_message: str,
+    chat_event: dict[str, Any] | None,
+    space_name: str,
+) -> None:
+    from api.chat.messages import post_message_to_space
+
+    try:
+        out = _build_compose_from_message(user_message, chat_event)
+        out.pop("actionResponse", None)
+        post_message_to_space(space_name=space_name, payload=out)
+    except Exception:
+        logger.exception("예약 카드 백그라운드 생성 실패")
+        try:
+            post_message_to_space(
+                space_name=space_name,
+                payload={"text": "예약 카드를 만들지 못했어요. 잠시 후 다시 시도해 주세요."},
+            )
+        except Exception:
+            logger.warning("예약 카드 실패 알림 push 실패", exc_info=True)
 
 
 def handle_schedule_management_action(
