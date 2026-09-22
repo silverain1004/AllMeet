@@ -321,6 +321,21 @@ def _member_suggestion_items(members: list[dict[str, Any]]) -> list[dict[str, st
     return items
 
 
+_QUICK_PICK_ITEM_MAX = 20
+
+
+def _attendee_dropdown_items(members: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """빠른 선택 드롭다운용 — 자동완성 제안과 같은 텍스트를 value로도 실어 선택 즉시
+    sm_compose_add_attendee가 그대로 파싱할 수 있게 한다.
+
+    text+value를 함께 실어 자동완성 제안(text만) 대비 항목당 용량이 커지는 데다,
+    onChangeAction이 붙는 위젯이라 카드 전체 용량(Chat 한도 ~32KB)에 그대로 더해진다.
+    팀 제안이 먼저 오는 순서를 그대로 살려 팀 전체 추가처럼 자주 쓰는 항목만 앞쪽에
+    남기고 개인 검색은 자유 입력창(자동완성)에 맡긴다."""
+    items = _member_suggestion_items(members)[:_QUICK_PICK_ITEM_MAX]
+    return [{"text": it["text"][:80], "value": it["text"]} for it in items]
+
+
 def _compose_summary_line(state: dict[str, Any]) -> str:
     parts: list[str] = []
     date_kr = format_date_korean(str(state.get("meeting_date") or ""))
@@ -622,15 +637,19 @@ def build_result_card(
     )
 
 
+_CHIP_REMOVE_BUTTON_MAX = 5
+
+
 def _attendee_chip_buttons(
     state: dict[str, Any],
     base_params: dict[str, str],
 ) -> list[dict[str, Any]]:
-    """추가된 참석자 목록 + 제거 드롭다운.
+    """추가된 참석자 목록 — 적을 땐 참석자마다 칩 형태로 ✕ 버튼, 많을 땐 드롭다운+제거.
 
-    예전엔 참석자마다 'x' 버튼을 두고 버튼마다 전체 상태(참석자 목록 포함)를 파라미터로 실어,
-    팀 두 개(13명)만 넣어도 카드가 48KB 로 Chat 한도(~32KB)를 넘겨 "요청을 처리할 수 없음"이
-    났다. 상태 파라미터를 가진 버튼은 하나만 두고 대상은 드롭다운으로 고른다.
+    예전엔 인원수와 무관하게 참석자마다 'x' 버튼을 두고 버튼마다 전체 상태(참석자 목록
+    포함)를 파라미터로 실어, 팀 두 개(13명)만 넣어도 카드가 48KB 로 Chat 한도(~32KB)를
+    넘겨 "요청을 처리할 수 없음"이 났다. 인원이 적을 때만(<= _CHIP_REMOVE_BUTTON_MAX)
+    사람마다 ✕ 버튼을 두고, 그 이상이면 버튼 하나 + 드롭다운으로 대상만 고른다.
     """
     widgets: list[dict[str, Any]] = []
     attendees = state.get("attendees") or []
@@ -638,6 +657,7 @@ def _attendee_chip_buttons(
         return widgets
     labels: list[str] = []
     items: list[dict[str, Any]] = []
+    people: list[tuple[str, str]] = []
     for person in attendees:
         name = str(person.get("name") or "").strip()
         email = str(person.get("email") or "").strip()
@@ -646,6 +666,33 @@ def _attendee_chip_buttons(
         label = f"{name}({email})" if name and email else (email or name)
         labels.append(html.escape(name or email))
         items.append({"text": label[:80], "value": email or name})
+        people.append((label, email or name))
+
+    if len(people) <= _CHIP_REMOVE_BUTTON_MAX:
+        widgets.append(
+            {"textParagraph": {"text": f"<b>추가된 참석자 {len(people)}명</b>"}}
+        )
+        for label, target in people:
+            params = dict(base_params)
+            params["remove_email"] = target
+            widgets.append(
+                {
+                    "decoratedText": {
+                        "text": html.escape(label[:80]),
+                        "button": {
+                            "text": "✕",
+                            "onClick": {
+                                "action": {
+                                    "function": "sm_compose_remove_attendee_email",
+                                    "parameters": _params_list(params),
+                                }
+                            },
+                        },
+                    }
+                }
+            )
+        return widgets
+
     widgets.append(
         {
             "textParagraph": {
@@ -990,13 +1037,33 @@ def _attendee_block(
     members: list[dict[str, Any]],
     pending_candidates: list[dict[str, str]] | None,
 ) -> list[dict[str, Any]]:
-    """참석자 목록/제거 + 추가 입력란(팀 제안 포함). 참석자 수가 회의실 추천을 좌우하므로
-    간편 예약(첫 카드)에 둔다."""
+    """참석자 추가(빠른 선택 드롭다운 + 직접 입력) → 제거 순. 참석자 수가 회의실 추천을
+    좌우하므로 간편 예약(첫 카드)에 둔다."""
     widgets: list[dict[str, Any]] = []
     widgets.append({"textParagraph": {"text": "<b>참석자</b>"}})
-    widgets.extend(_attendee_chip_buttons(state, base_params))
-    if pending_candidates:
-        widgets.extend(_candidate_buttons(pending_candidates, base_params))
+
+    # onChangeAction이 있는 새 드롭다운이라 base_params(참석자 목록 포함)를 그대로 지고
+    # 간다 — 참석자가 많아 카드가 이미 커진 상태에서는 건너뛰어 용량 한도를 지킨다.
+    quick_items = (
+        _attendee_dropdown_items(members)
+        if len(state.get("attendees") or []) <= _CHIP_REMOVE_BUTTON_MAX
+        else []
+    )
+    if quick_items:
+        widgets.append(
+            {
+                "selectionInput": {
+                    "name": "attendee_quick_pick",
+                    "label": "빠른 선택 (팀/이름 · 선택 시 바로 추가)",
+                    "type": "DROPDOWN",
+                    "items": quick_items,
+                    "onChangeAction": {
+                        "function": "sm_compose_add_attendee",
+                        "parameters": _params_list(base_params),
+                    },
+                }
+            }
+        )
 
     attendee_input: dict[str, Any] = {
         "name": "attendee_input",
@@ -1020,16 +1087,10 @@ def _attendee_block(
             ],
         )
     )
-    widgets.append(
-        {
-            "textParagraph": {
-                "text": (
-                    '<font color="#9aa0a6">💡 팀명(예: PC2팀)만 입력하면 팀원 전체가 추가돼요</font>'
-                )
-            }
-        }
-    )
+    if pending_candidates:
+        widgets.extend(_candidate_buttons(pending_candidates, base_params))
 
+    widgets.extend(_attendee_chip_buttons(state, base_params))
     return widgets
 
 

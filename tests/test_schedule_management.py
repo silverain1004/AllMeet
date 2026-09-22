@@ -259,8 +259,8 @@ def test_attendee_count_button_selection_filled():
     state["attendee_count"] = 8
     out = build_quick_compose_card(state, recommended_rooms=[])
     widgets = out["cardsV2"][0]["card"]["sections"][0]["widgets"]
-    # [0..4] = date header/picker + attendee header/input/tip
-    buttons = widgets[5]["buttonList"]["buttons"]
+    # [0..3] = date header/picker + attendee header/input row
+    buttons = widgets[4]["buttonList"]["buttons"]
     filled = [b for b in buttons if b.get("type") == "FILLED"]
     assert len(filled) == 1
     assert filled[0]["text"] == "8+"
@@ -378,12 +378,12 @@ def test_quick_compose_card_widgets():
     assert picker["timezoneOffsetDate"] == 540
     assert picker["onChangeAction"]["function"] == "sm_compose_quick_update"
     assert "onChangeAction" not in widgets[1]
-    # [2..4] = attendee block (header, input row, tip) — moved to the first card
-    ac_buttons = widgets[5]["buttonList"]["buttons"]
+    # [2..3] = attendee block (header, input row) — moved to the first card
+    ac_buttons = widgets[4]["buttonList"]["buttons"]
     assert [b["text"] for b in ac_buttons] == ["4+", "8+", "10+", "15+"]
     assert not any(b.get("type") == "FILLED" for b in ac_buttons)
-    assert "columns" in widgets[6]
-    radio = widgets[7]["selectionInput"]
+    assert "columns" in widgets[5]
+    radio = widgets[6]["selectionInput"]
     assert radio["type"] == "RADIO_BUTTON"
     assert not any(item.get("selected") for item in radio["items"])
     assert not any(

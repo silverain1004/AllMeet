@@ -483,11 +483,11 @@ def _merge_extracted_state(base: dict[str, Any], extracted: dict[str, Any]) -> d
     return out
 
 
-def _ensure_booker_in_attendees(state: dict[str, Any], booker_email: str) -> None:
+def _ensure_booker_in_attendees(state: dict[str, Any], booker_email: str, booker_name: str = "") -> None:
     email = str(booker_email or "").strip()
     if not email:
         return
-    name = ""
+    name = str(booker_name or "").strip()
     for a in state.get("attendees") or []:
         if str(a.get("email") or "").strip().lower() == email.lower():
             return
@@ -603,7 +603,8 @@ def _build_compose_from_message(
     )
     state = _merge_extracted_state(empty_compose_state(), extracted)
     state["compose_step"] = "quick"
-    _ensure_booker_in_attendees(state, _user_context(chat_event).get("email", ""))
+    _booker_ctx = _user_context(chat_event)
+    _ensure_booker_in_attendees(state, _booker_ctx.get("email", ""), _booker_ctx.get("name", ""))
     sync_attendee_count_from_headcount(state)
     _ensure_calendar_id(state, chat_event)
     out = _render_compose(state, chat_event=chat_event, members=members)
@@ -822,7 +823,11 @@ def handle_schedule_management_action(
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_add_attendee":
-        raw = _safe_form_value(form_inputs, "attendee_input")
+        # 빠른 선택 드롭다운(선택 즉시 제출)이 값을 주면 그걸 우선한다 — 자유 입력창에
+        # 아직 제출 안 한 텍스트가 남아 있어도 방금 고른 항목이 이겨야 한다.
+        raw = _safe_form_value(form_inputs, "attendee_quick_pick") or _safe_form_value(
+            form_inputs, "attendee_input"
+        )
         state["errors"] = []
         state["info"] = []
         if not raw:
@@ -881,6 +886,10 @@ def handle_schedule_management_action(
                         ]
                     else:
                         state["errors"] = ["등록된 이름이 없습니다. 이메일 형식으로 입력해 주세요."]
+        # 인원수 버튼을 아직 안 눌렀어도 참석자가 생기면 그 수로 자동 선택 — 그래야
+        # 간편예약 미리보기 조건(ready_for_quick_room_preview)이 충족돼 참석자를 추가할
+        # 때마다 일정 충돌 검사가 바로 돈다.
+        sync_attendee_count_from_headcount(state)
         return _render_compose(
             state,
             chat_event=chat_event,
@@ -894,6 +903,7 @@ def handle_schedule_management_action(
         name = parameters.get("pick_name", "").strip()
         if email and not any(a.get("email") == email for a in state.get("attendees") or []):
             state.setdefault("attendees", []).append({"name": name, "email": email})
+        sync_attendee_count_from_headcount(state)
         return _render_compose(state, chat_event=chat_event, include_action_response=True, members=members)
 
     if invoked_function == "sm_compose_remove_attendee":
@@ -994,7 +1004,7 @@ def handle_schedule_management_action(
         end_iso = to_kst_iso(str(state["meeting_date"]), end_time)
 
         booker_email = user_context.get("email", "")
-        _ensure_booker_in_attendees(state, booker_email)
+        _ensure_booker_in_attendees(state, booker_email, user_context.get("name", ""))
         attendee_emails = attendee_emails_for_event(state, booker_email)
         location = str(state.get("picked_room_name") or "").strip()
         picked_room = _room_by_id(str(state.get("picked_room_id") or ""))
