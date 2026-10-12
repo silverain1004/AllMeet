@@ -144,6 +144,45 @@ def looks_like_schedule_booking(msg: str) -> bool:
     return False
 
 
+# series_rebook: 이미 잡힌 반복(정기) 회의를 다른 회의실/시간으로 옮기기.
+_SERIES_SUBJECT_RE = re.compile(
+    r"(주간\s*회의|주간\s*미팅|정기\s*(?:회의|미팅|일정)|월간\s*회의|격주|매주|반복\s*(?:일정|회의))"
+)
+_SERIES_CHANGE_RE = re.compile(r"(옮기|옮겨|옮길|변경|수정|바꾸|바꿔|바꿀|대체|이동|재배치|다시\s*잡)")
+_SERIES_TARGET_RE = re.compile(r"(회의실|시간|일정|일시|요일)")
+_SERIES_NEG_RE = re.compile(r"(주간\s*보고|페이지|회의록|요약)")
+# 장기 재배치 신호 — 없으면 "내일 주간회의 시간 변경"처럼 한 회차 수정(event_edit)으로 본다.
+_SERIES_SPAN_RE = re.compile(r"(부터|이후|앞으로|계속|쭉|장기|매주|매번|고정)")
+
+
+def looks_like_series_rebook(msg: str) -> bool:
+    """'주간회의/정기회의/매주 ~ (N월부터·쭉) 회의실·시간 옮겨/변경/수정' — 기존 반복 일정 재배치."""
+    text = (msg or "").strip()
+    if not text or _SERIES_NEG_RE.search(text) or _EDIT_DELETE_RE.search(text):
+        return False
+    return bool(
+        _SERIES_SUBJECT_RE.search(text)
+        and _SERIES_CHANGE_RE.search(text)
+        and _SERIES_TARGET_RE.search(text)
+        and _SERIES_SPAN_RE.search(text)
+    )
+
+
+# event_edit: 이미 있는 일정 하나(또는 반복 일정)를 수정·삭제.
+_EDIT_SUBJECT_RE = re.compile(r"(일정|회의|미팅|약속|예약|면담|세미나|스탠드업)")
+_EDIT_DELETE_RE = re.compile(r"(취소|삭제|지워|지우|없애|없에|날려)")
+_EDIT_CHANGE_RE = re.compile(r"(옮기|옮겨|옮길|변경|수정|바꾸|바꿔|미뤄|미루|당겨|당기|연기|이동|늘려|줄여)")
+_EDIT_NEG_RE = re.compile(r"(주간\s*보고|페이지|회의록|요약|정리|설정|등록)")
+
+
+def looks_like_event_edit(msg: str) -> bool:
+    """'내일 3시 회의 4시로 옮겨줘' / '주간회의 10/15만 취소' — 기존 일정 수정·삭제."""
+    text = (msg or "").strip()
+    if not text or _EDIT_NEG_RE.search(text):
+        return False
+    return bool(_EDIT_SUBJECT_RE.search(text) and (_EDIT_DELETE_RE.search(text) or _EDIT_CHANGE_RE.search(text)))
+
+
 def looks_like_weekly_meeting_setup(msg: str) -> bool:
     """'팀/인원 등록·주간업무 설정' 또는 '주간회의 + 등록/설정'. 주간보고는 제외."""
     text = (msg or "").strip()

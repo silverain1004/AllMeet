@@ -35,6 +35,7 @@ class CalendarResult:
     calendar_list_items: list[dict[str, Any]] = field(default_factory=list)
     error_kind: str = ""
     detail: str = ""
+    next_page_token: str = ""
 
 
 def calendar_error_message(result: CalendarResult) -> str:
@@ -206,6 +207,39 @@ def extract_meet_link(event: dict[str, Any] | None) -> str:
     return ""
 
 
+def _event_row(item: dict[str, Any]) -> dict[str, Any]:
+    start = item.get("start") or {}
+    end = item.get("end") or {}
+    attendees: list[dict[str, Any]] = []
+    for att in item.get("attendees") or []:
+        if not isinstance(att, dict):
+            continue
+        attendees.append(
+            {
+                "email": str(att.get("email") or "").strip(),
+                "displayName": str(att.get("displayName") or "").strip(),
+                "resource": bool(att.get("resource")),
+            }
+        )
+    organizer = item.get("organizer") or {}
+    original = item.get("originalStartTime") or {}
+    return {
+        "id": str(item.get("id") or ""),
+        "summary": str(item.get("summary") or "").strip(),
+        "start": str(start.get("dateTime") or start.get("date") or ""),
+        "end": str(end.get("dateTime") or end.get("date") or ""),
+        "html_link": str(item.get("htmlLink") or ""),
+        "location": str(item.get("location") or "").strip(),
+        "attendees": attendees,
+        # 반복 일정 인스턴스면 원본 시리즈 id — 정기회의 재배치가 시리즈 단위로 묶을 때 쓴다.
+        "recurring_event_id": str(item.get("recurringEventId") or ""),
+        "original_start": str(original.get("dateTime") or original.get("date") or ""),
+        "organizer_email": str(organizer.get("email") or "").strip(),
+        "organizer_self": bool(organizer.get("self")),
+        "status": str(item.get("status") or ""),
+    }
+
+
 def list_events(
     *,
     calendar_id: str,
@@ -214,6 +248,7 @@ def list_events(
     q: str = "",
     max_results: int = 30,
     access_token: str | None = None,
+    page_token: str = "",
 ) -> CalendarResult:
     params: dict[str, str] = {
         "timeMin": time_min,
@@ -224,6 +259,8 @@ def list_events(
     }
     if q:
         params["q"] = q
+    if page_token:
+        params["pageToken"] = page_token
     encoded = urllib.parse.urlencode(params)
     url = (
         "https://www.googleapis.com/calendar/v3/calendars/"
@@ -233,36 +270,76 @@ def list_events(
     if err is not None:
         return err
     items = (data or {}).get("items") or []
-    out: list[dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        start = item.get("start") or {}
-        end = item.get("end") or {}
-        attendees_raw = item.get("attendees") or []
-        attendees: list[dict[str, Any]] = []
-        for att in attendees_raw:
-            if not isinstance(att, dict):
-                continue
-            attendees.append(
-                {
-                    "email": str(att.get("email") or "").strip(),
-                    "displayName": str(att.get("displayName") or "").strip(),
-                    "resource": bool(att.get("resource")),
-                }
-            )
-        out.append(
-            {
-                "id": str(item.get("id") or ""),
-                "summary": str(item.get("summary") or "").strip(),
-                "start": str(start.get("dateTime") or start.get("date") or ""),
-                "end": str(end.get("dateTime") or end.get("date") or ""),
-                "html_link": str(item.get("htmlLink") or ""),
-                "location": str(item.get("location") or "").strip(),
-                "attendees": attendees,
-            }
+    out = [_event_row(item) for item in items if isinstance(item, dict)]
+    return CalendarResult(
+        ok=True, events=out, next_page_token=str((data or {}).get("nextPageToken") or "")
+    )
+
+
+def list_events_all(
+    *,
+    calendar_id: str,
+    time_min: str,
+    time_max: str,
+    q: str = "",
+    access_token: str | None = None,
+    max_pages: int = 10,
+) -> CalendarResult:
+    """``list_events`` 를 nextPageToken 끝까지(최대 ``max_pages``) 따라가 합친다 — 수개월 범위 조회용."""
+    events: list[dict[str, Any]] = []
+    token = ""
+    for _ in range(max_pages):
+        result = list_events(
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+            q=q,
+            max_results=250,
+            access_token=access_token,
+            page_token=token,
         )
-    return CalendarResult(ok=True, events=out)
+        if not result.ok:
+            return result if not events else CalendarResult(ok=True, events=events)
+        events.extend(result.events)
+        token = result.next_page_token
+        if not token:
+            break
+    return CalendarResult(ok=True, events=events)
+
+
+def list_instances(
+    *,
+    calendar_id: str,
+    event_id: str,
+    time_min: str,
+    time_max: str,
+    access_token: str | None = None,
+    max_pages: int = 5,
+) -> CalendarResult:
+    """반복 일정 시리즈의 인스턴스(예외 포함) — GET /events/{id}/instances."""
+    if not calendar_id or not event_id:
+        return CalendarResult(ok=False, error_kind="event_field_missing")
+    events: list[dict[str, Any]] = []
+    token = ""
+    for _ in range(max_pages):
+        params = {"timeMin": time_min, "timeMax": time_max, "maxResults": "250"}
+        if token:
+            params["pageToken"] = token
+        url = (
+            "https://www.googleapis.com/calendar/v3/calendars/"
+            f"{urllib.parse.quote(calendar_id, safe='')}/events/"
+            f"{urllib.parse.quote(event_id, safe='')}/instances?{urllib.parse.urlencode(params)}"
+        )
+        data, err = _request(url=url, method="GET", write=False, access_token=access_token)
+        if err is not None:
+            return err if not events else CalendarResult(ok=True, events=events)
+        events.extend(
+            _event_row(item) for item in (data or {}).get("items") or [] if isinstance(item, dict)
+        )
+        token = str((data or {}).get("nextPageToken") or "")
+        if not token:
+            break
+    return CalendarResult(ok=True, events=events)
 
 
 def freebusy_query(
@@ -318,6 +395,8 @@ def create_event(
     send_updates: str = "none",
     add_google_meet: bool = False,
     access_token: str | None = None,
+    recurrence: list[str] | None = None,
+    conference_data: dict[str, Any] | None = None,
 ) -> CalendarResult:
     if is_dry_run():
         return CalendarResult(
@@ -346,7 +425,12 @@ def create_event(
     merged_attendees = _merge_attendees(attendees, resource_emails)
     if merged_attendees:
         body["attendees"] = merged_attendees
-    if add_google_meet:
+    if recurrence:
+        body["recurrence"] = list(recurrence)
+    if conference_data:
+        # 기존 일정의 conferenceData 를 그대로 넘기면 같은 Meet 링크를 재사용한다.
+        body["conferenceData"] = conference_data
+    elif add_google_meet:
         body["conferenceData"] = {
             "createRequest": {
                 "requestId": f"allmeet-{int(datetime.now().timestamp())}",
@@ -354,7 +438,7 @@ def create_event(
             }
         }
     query: dict[str, str] = {"sendUpdates": send_updates}
-    if add_google_meet:
+    if add_google_meet or conference_data:
         query["conferenceDataVersion"] = "1"
     params = urllib.parse.urlencode(query)
     url = (
@@ -374,6 +458,7 @@ def delete_event(
     calendar_id: str,
     event_id: str,
     access_token: str | None = None,
+    send_updates: str = "",
 ) -> CalendarResult:
     if is_dry_run():
         return CalendarResult(ok=True)
@@ -381,6 +466,8 @@ def delete_event(
         "https://www.googleapis.com/calendar/v3/calendars/"
         f"{urllib.parse.quote(calendar_id, safe='')}/events/{urllib.parse.quote(event_id, safe='')}"
     )
+    if send_updates:
+        url += "?" + urllib.parse.urlencode({"sendUpdates": send_updates})
     _, err = _request(url=url, method="DELETE", write=True, access_token=access_token)
     if err is not None:
         return err
@@ -418,6 +505,7 @@ def patch_event(
     time_zone: str = "Asia/Seoul",
     send_updates: str = "none",
     access_token: str | None = None,
+    recurrence: list[str] | None = None,
 ) -> CalendarResult:
     if is_dry_run():
         return CalendarResult(ok=True, created_event={"id": event_id})
@@ -432,6 +520,8 @@ def patch_event(
         body["end"] = {"dateTime": end_iso, "timeZone": time_zone}
     if location is not None:
         body["location"] = location
+    if recurrence is not None:
+        body["recurrence"] = list(recurrence)
     if attendees is not None or resource_emails is not None:
         people = attendees
         resources = resource_emails
@@ -469,6 +559,30 @@ def patch_event(
     data, err = _request(
         url=url, method="PATCH", write=True, body=body, access_token=access_token
     )
+    if err is not None:
+        return err
+    return CalendarResult(ok=True, created_event=data or {})
+
+
+def patch_event_raw(
+    *,
+    calendar_id: str,
+    event_id: str,
+    body: dict[str, Any],
+    send_updates: str = "none",
+    access_token: str | None = None,
+) -> CalendarResult:
+    """임의 필드 PATCH — 백업 복원용(start/end/attendees/recurrence/status 원본 그대로)."""
+    if is_dry_run():
+        return CalendarResult(ok=True, created_event={"id": event_id})
+    if not calendar_id or not event_id or not body:
+        return CalendarResult(ok=False, error_kind="event_field_missing")
+    url = (
+        "https://www.googleapis.com/calendar/v3/calendars/"
+        f"{urllib.parse.quote(calendar_id, safe='')}/events/{urllib.parse.quote(event_id, safe='')}"
+        f"?{urllib.parse.urlencode({'sendUpdates': send_updates})}"
+    )
+    data, err = _request(url=url, method="PATCH", write=True, body=body, access_token=access_token)
     if err is not None:
         return err
     return CalendarResult(ok=True, created_event=data or {})

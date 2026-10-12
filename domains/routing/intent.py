@@ -242,10 +242,12 @@ def _deterministic_label(msg: str, ctx_block: str) -> tuple[str, str] | None:
     from domains.routing.patterns import (
         is_exact_home_greeting,
         looks_like_agent_task,
+        looks_like_event_edit,
         looks_like_expert_finder,
         looks_like_home_greeting,
         looks_like_my_schedule,
         looks_like_schedule_booking,
+        looks_like_series_rebook,
         looks_like_vacation_query,
         looks_like_weekly_meeting_setup,
         looks_like_weekly_page_create,
@@ -261,6 +263,11 @@ def _deterministic_label(msg: str, ctx_block: str) -> tuple[str, str] | None:
     # agent(요약/찾기)보다 먼저 — "주간페이지 만들어줘"가 agent 로 가지 않게 함
     if looks_like_weekly_page_create(msg):
         return "weekly_page_create", "weekly_page_create_fastpath"
+    # 정기회의 재배치는 "찾고 싶어" 같은 표현이 agent 패턴에 걸리기 전에 회의실 도메인으로 보낸다.
+    if looks_like_series_rebook(msg):
+        return "schedule_management", "series_rebook_fastpath"
+    if looks_like_event_edit(msg):
+        return "schedule_management", "event_edit_fastpath"
     if looks_like_agent_task(msg):
         return "agent", "agent_pattern"
     # 개인 일정 요약·휴가 조회는 agent(list_calendar_events/lookup_team_vacation)로 — daily_chat 거부 방지.

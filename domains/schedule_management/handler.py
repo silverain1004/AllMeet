@@ -566,6 +566,15 @@ def handle_schedule_management(
     user_message: str,
     chat_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # 기존 반복(정기) 회의를 옮기는 요청은 단건 예약 카드가 아니라 재배치 카드로 간다.
+    from domains.routing.patterns import looks_like_event_edit, looks_like_series_rebook
+
+    if looks_like_series_rebook(user_message):
+        return _start_series_rebook(user_message, chat_event)
+    # 이미 있는 일정의 수정·삭제("내일 회의 4시로 옮겨줘", "주간회의 10/15만 취소").
+    if looks_like_event_edit(user_message):
+        return _start_event_edit(user_message, chat_event)
+
     # '회의실 뭐 있어/목록' 류는 예약 카드가 아니라 회의실 목록 카드를 보여준다.
     if _is_room_list_query(user_message):
         from domains.settings.cards import build_room_list_card
@@ -589,6 +598,55 @@ def handle_schedule_management(
         start_background(_run_compose_background, user_message, chat_event, space_name)
         return loading_text("예약 카드를 준비하는 중이에요…")
     return _build_compose_from_message(user_message, chat_event)
+
+
+def _start_series_rebook(user_message: str, chat_event: dict[str, Any] | None) -> dict[str, Any]:
+    from domains.schedule_management.series_flow import build_series_rebook_from_message
+
+    space_name = _space_id(chat_event)
+    if space_name and (chat_event or {}).get("type") == "MESSAGE":
+        from api.chat.loading import loading_text, start_background
+
+        start_background(
+            _run_card_background, build_series_rebook_from_message, user_message, chat_event, space_name
+        )
+        return loading_text("기존 반복 일정을 찾고, 앞으로 몇 주치 회의실을 확인하는 중이에요…")
+    return build_series_rebook_from_message(user_message, chat_event)
+
+
+def _start_event_edit(user_message: str, chat_event: dict[str, Any] | None) -> dict[str, Any]:
+    from domains.schedule_management.event_edit_flow import build_event_edit_from_message
+
+    space_name = _space_id(chat_event)
+    if space_name and (chat_event or {}).get("type") == "MESSAGE":
+        from api.chat.loading import loading_text, start_background
+
+        start_background(_run_card_background, build_event_edit_from_message, user_message, chat_event, space_name)
+        return loading_text("기존 일정을 찾는 중이에요…")
+    return build_event_edit_from_message(user_message, chat_event)
+
+
+def _run_card_background(
+    builder: Any,
+    user_message: str,
+    chat_event: dict[str, Any] | None,
+    space_name: str,
+) -> None:
+    from api.chat.messages import post_message_to_space
+
+    try:
+        out = builder(user_message, chat_event)
+        out.pop("actionResponse", None)
+        post_message_to_space(space_name=space_name, payload=out)
+    except Exception:
+        logger.exception("카드 백그라운드 생성 실패 builder=%s", getattr(builder, "__name__", builder))
+        try:
+            post_message_to_space(
+                space_name=space_name,
+                payload={"text": "카드를 만들지 못했어요. 잠시 후 다시 시도해 주세요."},
+            )
+        except Exception:
+            logger.warning("카드 실패 알림 push 실패", exc_info=True)
 
 
 def _build_compose_from_message(
@@ -646,6 +704,23 @@ def handle_schedule_management_action(
     user_context = _user_context(chat_event)
     space_id = _space_id(chat_event)
     members = get_all_members()
+
+    if invoked_function.startswith("sm_evt_"):
+        from domains.schedule_management.event_edit_flow import handle_event_edit_action
+
+        return handle_event_edit_action(
+            invoked_function=invoked_function,
+            parameters=parameters,
+            form_inputs=form_inputs,
+            chat_event=chat_event,
+        )
+
+    if invoked_function.startswith("sm_series_"):
+        from domains.schedule_management.series_flow import handle_series_action
+
+        return handle_series_action(
+            invoked_function=invoked_function, parameters=parameters, chat_event=chat_event
+        )
 
     if invoked_function == "sm_open_menu":
         from domains.daily_chat.home_menu import build_home_menu_card

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from domains.schedule_management.calendar_client import KST, list_events
+from domains.schedule_management.calendar_client import KST, list_events, list_events_all
 from domains.schedule_management.room_calendar_store import get_room_calendar_config
 
 
@@ -14,11 +14,21 @@ def list_group_room_bookings(
     time_min: str,
     time_max: str,
     access_token: str | None = None,
+    all_pages: bool = False,
 ) -> list[dict[str, Any]]:
     config = get_room_calendar_config()
     group_id = str(config.get("group_calendar_id") or "").strip()
     if not group_id:
         return []
+    if all_pages:
+        # 하루치는 50건이면 충분하지만 주·월 단위 조회(정기회의 재배치)는 페이지를 끝까지 따라간다.
+        result = list_events_all(
+            calendar_id=group_id,
+            time_min=time_min,
+            time_max=time_max,
+            access_token=access_token,
+        )
+        return list(result.events) if result.ok else []
     result = list_events(
         calendar_id=group_id,
         time_min=time_min,
