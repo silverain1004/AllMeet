@@ -97,8 +97,8 @@ def test_run_weekly_page_job_defaults_missing_mode_to_copy_latest():
     tpl_fn.assert_not_called()
 
 
-def test_run_weekly_page_job_skips_on_inactive_weekday():
-    """weekly_active_weekdays 지정 팀(ERP2): 일요일(6) 외엔 스킵, Confluence 호출 없음."""
+def test_run_weekly_page_job_missed_only_on_inactive_weekday():
+    """weekly_active_weekdays 지정 팀(ERP2): 일요일(6) 외엔 누락 페이지 생성만(missed_since) — 기존 페이지 패치 안 함."""
     from datetime import datetime
 
     from domains.weekly_meeting.page_creator import run_weekly_page_job
@@ -119,13 +119,103 @@ def test_run_weekly_page_job_skips_on_inactive_weekday():
     ), patch(
         "domains.weekly_meeting.page_creator.datetime"
     ) as mock_dt, patch(
-        "domains.weekly_meeting.page_creator._create_by_copy"
+        "domains.weekly_meeting.page_creator._create_by_copy",
+        return_value="copied",
     ) as copy_fn:
         mock_dt.now.return_value = monday
         result = run_weekly_page_job("ERP2")
 
+    assert result == "copied"
+    assert copy_fn.call_args.kwargs["missed_since"] == datetime(2026, 8, 16)  # 직전 일요일
+
+
+def test_create_by_copy_missed_skips_existing_page():
+    """비활성 요일: 이번 주 페이지가 이미 있으면 update_page 없이 스킵."""
+    from datetime import datetime
+
+    from domains.weekly_meeting import page_creator as pc
+
+    client = MagicMock()
+    with patch.object(pc, "ConfluenceClient", return_value=client), patch.object(
+        pc, "_find_reference_date", return_value=datetime(2026, 10, 15)
+    ), patch.object(
+        pc, "get_latest_weekly_report_page_id_for_team_root", return_value="111"
+    ), patch.object(
+        pc, "fetch_weekly_report_html", return_value="<p>x</p>"
+    ), patch.object(
+        pc, "_find_page_in_folder", return_value="222"
+    ):
+        result = pc._create_by_copy(
+            "ERP2",
+            {"team_name": "ERP2팀", "report_root_page_id": "https://x/folder/2116845588",
+             "weekly_folder_layout": "single", "space_key": "ERP2", "vacation_calendar_id": ""},
+            missed_since=datetime(2026, 10, 11),  # 직전 일요일 > 직전 회의(10/08)
+        )
+
+    assert "스킵" in result and "222" in result
+    client.update_page.assert_not_called()
+    client.create_page.assert_not_called()
+
+
+def test_create_by_copy_missed_creates_missing_page():
+    """비활성 요일: 이번 주 페이지가 없으면 생성 (활성 요일 실행 실패 누락분 보충)."""
+    from datetime import datetime
+
+    from domains.weekly_meeting import page_creator as pc
+
+    client = MagicMock()
+    client.create_page.return_value = {"id": "333"}
+    with patch.object(pc, "ConfluenceClient", return_value=client), patch.object(
+        pc, "_find_reference_date", return_value=datetime(2026, 10, 15)
+    ), patch.object(
+        pc, "get_latest_weekly_report_page_id_for_team_root", return_value="111"
+    ), patch.object(
+        pc, "fetch_weekly_report_html", return_value="<p>x</p>"
+    ), patch.object(
+        pc, "_find_page_in_folder", return_value=None
+    ):
+        result = pc._create_by_copy(
+            "ERP2",
+            {"team_name": "ERP2팀", "report_root_page_id": "https://x/folder/2116845588",
+             "weekly_folder_layout": "single", "space_key": "ERP2", "vacation_calendar_id": ""},
+            missed_since=datetime(2026, 10, 11),  # 직전 일요일 > 직전 회의(10/08)
+        )
+
+    assert "생성 완료" in result
+    assert client.create_page.call_args.kwargs["title"] == "2026-10-15 ERP2팀 주간회의"
+
+
+def test_create_by_copy_waits_for_active_day_after_meeting():
+    """ERP2 목요일 회의 직후(기준일=다음 주 목): 직전 일요일이 이번 회의 전이면 생성하지 않고 일요일까지 대기."""
+    from datetime import datetime
+
+    from domains.weekly_meeting import page_creator as pc
+
+    client = MagicMock()
+    with patch.object(pc, "ConfluenceClient", return_value=client), patch.object(
+        pc, "_find_reference_date", return_value=datetime(2026, 10, 22)
+    ), patch.object(pc, "get_latest_weekly_report_page_id_for_team_root") as latest_fn:
+        result = pc._create_by_copy(
+            "ERP2",
+            {"team_name": "ERP2팀", "report_root_page_id": "https://x/folder/2116845588"},
+            missed_since=datetime(2026, 10, 11),  # 직전 일요일 < 이번 회의(10/15)
+        )
+
     assert "스킵" in result
-    copy_fn.assert_not_called()
+    latest_fn.assert_not_called()
+    client.create_page.assert_not_called()
+
+
+def test_find_page_in_folder_raises_on_lookup_failure():
+    """폴더 조회 실패(403 등)를 '페이지 없음'으로 삼키지 않음 → 중복 생성 방지."""
+    import pytest
+
+    from domains.weekly_meeting.page_creator import _find_page_in_folder
+
+    client = MagicMock()
+    client.get_folder_direct_children.side_effect = RuntimeError("폴더 자식 목록 조회 실패: 403")
+    with pytest.raises(RuntimeError):
+        _find_page_in_folder(client, "1", "t")
 
 
 def test_run_weekly_page_job_runs_on_active_weekday():
@@ -157,6 +247,7 @@ def test_run_weekly_page_job_runs_on_active_weekday():
 
     assert result == "copied"
     copy_fn.assert_called_once()
+    assert copy_fn.call_args.kwargs["missed_since"] is None
 
 
 def test_run_weekly_page_job_no_weekday_gate_when_unset():

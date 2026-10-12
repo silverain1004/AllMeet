@@ -601,15 +601,34 @@ def _find_reference_date(calendar_id: str, team_name: str) -> datetime:
 # 공통 헬퍼
 # ---------------------------------------------------------------------------
 
+def _last_active_day(today: datetime, active_weekdays: list[int]) -> Optional[datetime]:
+    """today 이전(오늘 제외) 가장 최근의 실행 요일 날짜."""
+    for back in range(1, 8):
+        d = today - timedelta(days=back)
+        if d.weekday() in active_weekdays:
+            return d
+    return None
+
+
+def _missed_active_run(reference_date: datetime, last_active: datetime) -> bool:
+    """이번 회의 주기(직전 회의 이후)에 활성 요일이 이미 지나갔는가.
+
+    True 면 활성 요일 실행에서 만들어졌어야 할 페이지 → 비활성 요일이라도 누락 시 생성.
+    False 면 아직 활성 요일 전(예: ERP2 목요일 회의 직후 다음 주 페이지) → 활성 요일까지 대기.
+    직전 회의일은 주 1회 회의 가정으로 기준일 - 7일.
+    """
+    return last_active.date() > (reference_date - timedelta(days=7)).date()
+
+
 def _find_page_in_folder(client: ConfluenceClient, folder_id: str, title: str) -> Optional[str]:
-    """폴더에서 해당 제목 페이지 ID 반환. 없으면 None."""
-    try:
-        children = client.get_folder_direct_children(folder_id, limit=200)
-        for c in children:
-            if c.get("type") == "page" and c.get("title") == title:
-                return str(c["id"])
-    except Exception as e:
-        logger.warning("기존 페이지 조회 실패 (folder_id=%s): %s", folder_id, e)
+    """폴더에서 해당 제목 페이지 ID 반환. 없으면 None.
+
+    조회 실패(403 등)는 '없음'으로 삼키지 않고 그대로 올린다 — 없는 줄 알고 생성해 중복 페이지가 생기는 것 방지.
+    """
+    children = client.get_folder_direct_children(folder_id, limit=200)
+    for c in children:
+        if c.get("type") == "page" and c.get("title") == title:
+            return str(c["id"])
     return None
 
 
@@ -654,8 +673,11 @@ def _resolve_target_folder(
 # MES2: copy_latest
 # ---------------------------------------------------------------------------
 
-def _create_by_copy(team_id: str, cfg: dict) -> str:
-    """최신 주간회의 페이지 복사 후 주차 헤더 교체 (MES2)."""
+def _create_by_copy(team_id: str, cfg: dict, *, missed_since: Optional[datetime] = None) -> str:
+    """최신 주간회의 페이지 복사 후 주차 헤더 교체 (MES2).
+
+    missed_since: 비활성 요일 실행 — 직전 활성 요일. 누락된 페이지 생성만 하고 기존 페이지는 패치 안 함.
+    """
     team_name = str(cfg.get("team_name") or team_id)
     root_id = _get_root_id(cfg)
     if not root_id:
@@ -663,6 +685,8 @@ def _create_by_copy(team_id: str, cfg: dict) -> str:
 
     calendar_id = str(cfg.get("calendar_id") or "")
     reference_date = _find_reference_date(calendar_id, team_name)
+    if missed_since is not None and not _missed_active_run(reference_date, missed_since):
+        return f"스킵: 실행 요일 아님 (기준일 {reference_date.strftime('%Y-%m-%d')} 페이지는 활성 요일에 생성)"
     logger.info("[%s] copy_latest 기준일: %s", team_id, reference_date.strftime("%Y-%m-%d"))
 
     client = ConfluenceClient()
@@ -713,6 +737,8 @@ def _create_by_copy(team_id: str, cfg: dict) -> str:
 
     title = f"{reference_date.strftime('%Y-%m-%d')} {team_name} 주간회의"
     existing_id = _find_page_in_folder(client, target_folder_id, title)
+    if existing_id and missed_since is not None:
+        return f"스킵: 실행 요일 아님, 페이지 이미 있음: {title} (page_id={existing_id})"
     if existing_id:
         # 기존 페이지가 있으면 본문(사용자 작성 내용)은 보존하고
         # 일정 공유(휴가)·주차 날짜만 패치. vacation_map 이 비어도 스킵하지 않음
@@ -763,7 +789,7 @@ def _create_by_copy(team_id: str, cfg: dict) -> str:
 # PC2: from_template
 # ---------------------------------------------------------------------------
 
-def _create_from_template(team_id: str, cfg: dict) -> str:
+def _create_from_template(team_id: str, cfg: dict, *, missed_since: Optional[datetime] = None) -> str:
     """템플릿 기반 주간회의 페이지 생성 (PC2)."""
     team_name = str(cfg.get("team_name") or team_id)
     root_id = _get_root_id(cfg)
@@ -776,6 +802,8 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
 
     calendar_id = str(cfg.get("calendar_id") or "")
     reference_date = _find_reference_date(calendar_id, team_name)
+    if missed_since is not None and not _missed_active_run(reference_date, missed_since):
+        return f"스킵: 실행 요일 아님 (기준일 {reference_date.strftime('%Y-%m-%d')} 페이지는 활성 요일에 생성)"
     logger.info("[%s] from_template 기준일: %s", team_id, reference_date.strftime("%Y-%m-%d"))
 
     client = ConfluenceClient()
@@ -899,6 +927,8 @@ def _create_from_template(team_id: str, cfg: dict) -> str:
     #    일정 공유 표·주차 날짜·진도율 칩 색상만 패치. 없으면 템플릿으로 신규 생성.
     #    (매일 10시 스케줄러가 같은 reference_date 로 재실행돼도 작성 내용이 날아가지 않게 함)
     existing_id = _find_page_in_folder(client, target_folder_id, title)
+    if existing_id and missed_since is not None:
+        return f"스킵: 실행 요일 아님, 페이지 이미 있음: {title} (page_id={existing_id})"
     if existing_id:
         try:
             existing_page = client.get_page(existing_id, expand="body.storage")
@@ -938,12 +968,20 @@ def run_weekly_page_job(team_id: str) -> str:
     if not cfg:
         raise RuntimeError(f"팀 설정을 찾을 수 없습니다: {team_id}")
 
+    # 실행 요일(weekly_active_weekdays)은 기존 페이지 패치에만 적용.
+    # 비활성 요일에도 직전 활성 요일에 만들어졌어야 할 페이지가 없으면 생성한다 — 활성 요일 실행이 Confluence 장애 등으로
+    # 실패했을 때 다음 활성 요일(1주 뒤)까지 페이지가 비는 것을 막기 위함.
+    missed_since: Optional[datetime] = None
     active_weekdays = cfg.get("weekly_active_weekdays")
     if active_weekdays is not None:
-        today_weekday = datetime.now().weekday()  # Mon=0 ... Sun=6 (서버 로컬 시간 = KST 가정, 이 모듈의 기존 관례와 동일)
+        now = datetime.now()
+        today_weekday = now.weekday()  # Mon=0 ... Sun=6 (서버 로컬 시간 = KST 가정, 이 모듈의 기존 관례와 동일)
         if today_weekday not in active_weekdays:
-            logger.info("[%s] 오늘(weekday=%s)은 실행 요일이 아니라 스킵", team_id, today_weekday)
-            return f"스킵: 오늘은 실행 요일이 아님 (weekday={today_weekday})"
+            missed_since = _last_active_day(now, active_weekdays)
+            if missed_since is None:
+                logger.info("[%s] 오늘(weekday=%s)은 실행 요일이 아니라 스킵", team_id, today_weekday)
+                return f"스킵: 오늘은 실행 요일이 아님 (weekday={today_weekday})"
+            logger.info("[%s] 오늘(weekday=%s)은 실행 요일이 아님 — 페이지 누락 시에만 생성", team_id, today_weekday)
 
     mode = str(cfg.get("weekly_page_mode") or "").strip()
     if not mode:
@@ -959,8 +997,8 @@ def run_weekly_page_job(team_id: str) -> str:
 
     logger.info("weekly_page_job team=%s mode=%s", team_id, mode)
     if mode == "copy_latest":
-        return _create_by_copy(team_id, cfg)
-    return _create_from_template(team_id, cfg)
+        return _create_by_copy(team_id, cfg, missed_since=missed_since)
+    return _create_from_template(team_id, cfg, missed_since=missed_since)
 
 
 def run_weekly_page_jobs_all() -> str:
