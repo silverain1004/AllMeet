@@ -88,3 +88,43 @@ def test_create_from_template_creates_page_with_team_account():
     cls.assert_called_once_with(account_email="me@vntgcorp.com", api_token="my-token")
     client.create_page.assert_called_once()
     assert "페이지 생성 완료" in result
+
+
+def test_team_confluence_client_falls_back_to_global_when_team_auth_fails():
+    """팀 계정 토큰 만료·철회(401 등) → 글로벌 계정으로 생성."""
+    from domains.weekly_meeting import page_creator as pc
+
+    team_client, global_client = MagicMock(), MagicMock()
+    team_client.is_authenticated.return_value = False
+    cfg = {"confluence_user_email": "me@vntgcorp.com", "confluence_api_token": "expired"}
+    with patch.object(pc, "ConfluenceClient", side_effect=[team_client, global_client]) as cls:
+        client = pc._team_confluence_client("PC2", cfg)
+
+    assert client is global_client
+    assert cls.call_args_list[1] == ((), {})
+
+
+def test_team_confluence_client_keeps_team_account_when_auth_ok():
+    from domains.weekly_meeting import page_creator as pc
+
+    team_client = MagicMock()
+    team_client.is_authenticated.return_value = True
+    cfg = {"confluence_user_email": "me@vntgcorp.com", "confluence_api_token": "ok"}
+    with patch.object(pc, "ConfluenceClient", return_value=team_client) as cls:
+        client = pc._team_confluence_client("PC2", cfg)
+
+    assert client is team_client
+    cls.assert_called_once()
+
+
+def test_is_authenticated_false_on_401_and_network_error():
+    from api.confluence import client as cc
+
+    with patch.object(cc, "get_confluence_auth", return_value={"base_url": "https://x", "auth_header": "Basic y"}):
+        c = cc.ConfluenceClient()
+    with patch.object(cc.requests, "get", return_value=MagicMock(status_code=401)):
+        assert c.is_authenticated() is False
+    with patch.object(cc.requests, "get", side_effect=cc.requests.ConnectionError("down")):
+        assert c.is_authenticated() is False
+    with patch.object(cc.requests, "get", return_value=MagicMock(status_code=200)):
+        assert c.is_authenticated() is True

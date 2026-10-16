@@ -35,6 +35,19 @@ class ConfluenceClient:
             h["Content-Type"] = "application/json"
         return h
 
+    def is_authenticated(self) -> bool:
+        """현재 자격 증명으로 인증되는지 (토큰 만료·철회 시 401 → False). 네트워크 오류도 False."""
+        try:
+            res = requests.get(
+                f"{self._base_url}/wiki/rest/api/user/current",
+                headers=self._headers(),
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            logger.warning("Confluence 인증 확인 실패: %s", e)
+            return False
+        return res.status_code == 200
+
     # -------------------------------------------------------------------------
     # 페이지 (REST v1)
     # -------------------------------------------------------------------------

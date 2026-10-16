@@ -626,12 +626,20 @@ def _team_confluence_client(team_id: str, cfg: dict) -> ConfluenceClient:
     Confluence 페이지 작성자 = API 토큰 소유 계정이므로, 팀별로 작성자를 바꾸려면
     config/{team_id} 문서에 confluence_user_email + confluence_api_token 을 둔다.
     (global 의 user_email/api_token 은 get_team_config 에서 cfg 에 덮어써지므로 키 이름을 분리)
+    팀 계정 인증이 안 되면(토큰 만료·철회 등) 페이지 생성이 끊기지 않도록 글로벌 계정으로 폴백.
     """
     account_email = str(cfg.get("confluence_user_email") or "").strip()
     api_token = str(cfg.get("confluence_api_token") or "").strip()
     if account_email and api_token:
-        logger.info("[%s] Confluence 팀 계정 사용: %s", team_id, account_email)
-        return ConfluenceClient(account_email=account_email, api_token=api_token)
+        client = ConfluenceClient(account_email=account_email, api_token=api_token)
+        if client.is_authenticated():
+            logger.info("[%s] Confluence 팀 계정 사용: %s", team_id, account_email)
+            return client
+        logger.warning(
+            "[%s] Confluence 팀 계정 인증 실패(토큰 만료 가능) → 글로벌 계정으로 폴백: %s",
+            team_id,
+            account_email,
+        )
     return ConfluenceClient()
 
 
