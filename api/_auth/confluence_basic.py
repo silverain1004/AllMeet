@@ -11,11 +11,18 @@ import base64
 from firestore.team_config import get_token_for
 
 
-def get_confluence_auth(user_email: str = "") -> dict[str, str]:
+def get_confluence_auth(
+    user_email: str = "",
+    *,
+    account_email: str = "",
+    api_token: str = "",
+) -> dict[str, str]:
     """Confluence base URL + Basic auth 헤더 dict.
 
     Args:
         user_email: 미래에 팀별 토큰 사용 시 분기용. 현재는 글로벌 1개라 무시.
+        account_email / api_token: 둘 다 있으면 글로벌 계정 대신 이 계정으로 호출
+            (팀별 페이지 작성자 지정용). 하나라도 비면 글로벌 계정 사용.
 
     Returns:
         ``{"base_url": "https://vntg.atlassian.net", "auth_header": "Basic ..."}``
@@ -25,8 +32,11 @@ def get_confluence_auth(user_email: str = "") -> dict[str, str]:
     """
     token_info = get_token_for(user_email or "")
     base_url = token_info.get("url") or ""
-    user = token_info.get("user_email") or ""
-    api_token = token_info.get("api_token") or ""
+    if account_email and api_token:
+        user = account_email
+    else:
+        user = token_info.get("user_email") or ""
+        api_token = token_info.get("api_token") or ""
     if not (base_url and user and api_token):
         raise RuntimeError("confluence_global_config_incomplete")
     raw = f"{user}:{api_token}".encode("utf-8")

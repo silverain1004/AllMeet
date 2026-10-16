@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 class ConfluenceClient:
     """Confluence Cloud REST API 클라이언트."""
 
-    def __init__(self, user_email: str = ""):
-        auth = get_confluence_auth(user_email)
+    def __init__(self, user_email: str = "", *, account_email: str = "", api_token: str = ""):
+        auth = get_confluence_auth(user_email, account_email=account_email, api_token=api_token)
         self._base_url = auth["base_url"].rstrip("/")
         self._auth_header = auth["auth_header"]
         self._api_url = f"{self._base_url}/wiki/rest/api/content"

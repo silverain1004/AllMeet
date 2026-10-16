@@ -620,6 +620,21 @@ def _missed_active_run(reference_date: datetime, last_active: datetime) -> bool:
     return last_active.date() > (reference_date - timedelta(days=7)).date()
 
 
+def _team_confluence_client(team_id: str, cfg: dict) -> ConfluenceClient:
+    """팀 설정에 Confluence 계정 오버라이드가 있으면 그 계정으로, 없으면 글로벌 계정.
+
+    Confluence 페이지 작성자 = API 토큰 소유 계정이므로, 팀별로 작성자를 바꾸려면
+    config/{team_id} 문서에 confluence_user_email + confluence_api_token 을 둔다.
+    (global 의 user_email/api_token 은 get_team_config 에서 cfg 에 덮어써지므로 키 이름을 분리)
+    """
+    account_email = str(cfg.get("confluence_user_email") or "").strip()
+    api_token = str(cfg.get("confluence_api_token") or "").strip()
+    if account_email and api_token:
+        logger.info("[%s] Confluence 팀 계정 사용: %s", team_id, account_email)
+        return ConfluenceClient(account_email=account_email, api_token=api_token)
+    return ConfluenceClient()
+
+
 def _find_page_in_folder(client: ConfluenceClient, folder_id: str, title: str) -> Optional[str]:
     """폴더에서 해당 제목 페이지 ID 반환. 없으면 None.
 
@@ -689,7 +704,7 @@ def _create_by_copy(team_id: str, cfg: dict, *, missed_since: Optional[datetime]
         return f"스킵: 실행 요일 아님 (기준일 {reference_date.strftime('%Y-%m-%d')} 페이지는 활성 요일에 생성)"
     logger.info("[%s] copy_latest 기준일: %s", team_id, reference_date.strftime("%Y-%m-%d"))
 
-    client = ConfluenceClient()
+    client = _team_confluence_client(team_id, cfg)
 
     latest_page_id = get_latest_weekly_report_page_id_for_team_root(
         client, root_id, team_name, before_meeting_date=reference_date
@@ -806,7 +821,7 @@ def _create_from_template(team_id: str, cfg: dict, *, missed_since: Optional[dat
         return f"스킵: 실행 요일 아님 (기준일 {reference_date.strftime('%Y-%m-%d')} 페이지는 활성 요일에 생성)"
     logger.info("[%s] from_template 기준일: %s", team_id, reference_date.strftime("%Y-%m-%d"))
 
-    client = ConfluenceClient()
+    client = _team_confluence_client(team_id, cfg)
 
     # 1) 템플릿 HTML
     tpl_page = client.get_page(template_page_id, expand="body.storage")
